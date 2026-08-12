@@ -54,7 +54,6 @@ jobs:
           sed -i 's/com\.example\.wifi_guard_ai/com.example.wifiguardai/g' /tmp/app/android/app/build.gradle.kts
           sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 23/' /tmp/app/android/app/build.gradle.kts
           printf '%s\n' '' 'android {' '    androidResources {' '        noCompress += "tflite"' '    }' '}' '' 'dependencies {' '    implementation("androidx.core:core-ktx:1.15.0")' '    implementation("androidx.fragment:fragment-ktx:1.8.9")' '    implementation("com.google.android.gms:play-services-tflite-java:16.5.0")' '    implementation("com.google.android.gms:play-services-tflite-support:16.5.0")' '}' >> /tmp/app/android/app/build.gradle.kts
-          cat /tmp/app/android/app/build.gradle.kts
           cd /tmp/app
           flutter pub get
           flutter analyze
@@ -90,18 +89,25 @@ jobs:
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set -euxo pipefail
+            set -eu
             adb logcat -c
             adb install -r /tmp/app/build/app/outputs/flutter-apk/app-debug.apk
             adb shell am force-stop com.example.wifiguardai
             adb shell am start -W -n com.example.wifiguardai/.MainActivity | tee /tmp/am_start.txt
             sleep 8
             adb shell pidof com.example.wifiguardai | tee /tmp/app_pid.txt
+            test -s /tmp/app_pid.txt
             adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity|com.example.wifiguardai' | head -30 | tee /tmp/activity_state.txt
+            grep -q 'com.example.wifiguardai' /tmp/activity_state.txt
             adb exec-out screencap -p > /tmp/android_dashboard.png
+            test -s /tmp/android_dashboard.png
             adb logcat -d -v threadtime > /tmp/logcat_full.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai' /tmp/logcat_full.txt; then exit 1; fi
+            if grep -E 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai' /tmp/logcat_full.txt; then
+              echo 'Application crash detected in logcat'
+              exit 1
+            fi
             grep -E 'com\.example\.wifiguardai|flutter' /tmp/logcat_full.txt | tail -300 > /tmp/logcat_app.txt || true
+            echo 'EMULATOR_RUNTIME_SMOKE_TEST=PASS' | tee /tmp/runtime_result.txt
 
       - name: Package tested project
         if: always()
@@ -124,3 +130,4 @@ jobs:
             /tmp/logcat_full.txt
             /tmp/apk_sha256.txt
             /tmp/parser_test.log
+            /tmp/runtime_result.txt
