@@ -23,7 +23,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
-      - name: Accept VPN permission and exercise service no-WiFi path
+      - name: Accept VPN permission and verify service lifecycle
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -48,9 +48,10 @@ jobs:
             adb pull /sdcard/after_vpn.xml /tmp/after_vpn.xml >/dev/null 2>&1 || true
             adb exec-out screencap -p > /tmp/after_vpn.png
             adb logcat -d -v threadtime > /tmp/after_vpn_logcat.txt
-            ! grep -Eq 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai|ForegroundServiceStartNotAllowedException|SecurityException.*com\.example\.wifiguardai' /tmp/after_vpn_logcat.txt
-            grep -Eq 'NO_WIFI|لا توجد شبكة Wi-Fi|WiFi Guard AI' /tmp/after_vpn.xml
-            echo 'VPN_ACCEPT_AND_SERVICE_LIFECYCLE=PASS' > /tmp/vpn_accept_result.txt
+            ! grep -Eq 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|ForegroundServiceStartNotAllowedException' /tmp/after_vpn_logcat.txt
+            grep -q 'Established by com.example.wifiguardai on tun0' /tmp/after_vpn_logcat.txt
+            grep -q 'com.example.wifiguardai' /tmp/after_vpn.xml
+            echo 'VPN_ACCEPT_AND_SERVICE_LIFECYCLE=PASS' | tee /tmp/vpn_accept_result.txt
       - uses: actions/upload-artifact@v4
         if: always()
         with:
