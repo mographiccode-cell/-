@@ -1,0 +1,63 @@
+name: WiFiGuard VPN Accept + Service Lifecycle
+on:
+  push:
+    branches: [wifiguardai-ci-20260812]
+    paths:
+      - '.github/workflows/wifiguard_vpn_accept.yml'
+  workflow_dispatch:
+
+jobs:
+  vpn-accept:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wifiguard-android-test-results
+          path: /tmp/prior
+          github-token: ${{ github.token }}
+          run-id: 31611296693
+      - name: Prepare KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+      - name: Accept VPN permission and exercise service no-WiFi path
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -eu
+            adb logcat -c
+            adb install -r /tmp/prior/app/build/app/outputs/flutter-apk/app-debug.apk
+            adb shell am start -W -n com.example.wifiguardai/.MainActivity >/tmp/start.txt
+            sleep 5
+            adb shell input tap 540 1275
+            sleep 2
+            adb shell input tap 894 1520
+            sleep 7
+            adb shell pidof com.example.wifiguardai | tee /tmp/app_pid_after_vpn.txt
+            test -s /tmp/app_pid_after_vpn.txt
+            adb shell uiautomator dump /sdcard/after_vpn.xml >/dev/null 2>&1 || true
+            adb pull /sdcard/after_vpn.xml /tmp/after_vpn.xml >/dev/null 2>&1 || true
+            adb exec-out screencap -p > /tmp/after_vpn.png
+            adb logcat -d -v threadtime > /tmp/after_vpn_logcat.txt
+            ! grep -Eq 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai|ForegroundServiceStartNotAllowedException|SecurityException.*com\.example\.wifiguardai' /tmp/after_vpn_logcat.txt
+            grep -Eq 'NO_WIFI|لا توجد شبكة Wi-Fi|WiFi Guard AI' /tmp/after_vpn.xml
+            echo 'VPN_ACCEPT_AND_SERVICE_LIFECYCLE=PASS' > /tmp/vpn_accept_result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wifiguard-vpn-accept-results
+          path: |
+            /tmp/after_vpn.xml
+            /tmp/after_vpn.png
+            /tmp/after_vpn_logcat.txt
+            /tmp/app_pid_after_vpn.txt
+            /tmp/vpn_accept_result.txt
