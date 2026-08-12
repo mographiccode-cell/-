@@ -46,13 +46,14 @@ jobs:
           cp /tmp/source/analysis_options.yaml /tmp/app/analysis_options.yaml
           rm -rf /tmp/app/android/app/src/main/kotlin
           cp -a /tmp/source/android/app/src/main/kotlin /tmp/app/android/app/src/main/kotlin
+          cp ci_android/MainActivity.kt /tmp/app/android/app/src/main/kotlin/com/example/wifiguardai/MainActivity.kt
           cp /tmp/source/android/app/src/main/AndroidManifest.xml /tmp/app/android/app/src/main/AndroidManifest.xml
           mkdir -p /tmp/app/android/app/src/main/res/values /tmp/app/android/app/src/main/assets
           cp /tmp/source/android/app/src/main/res/values/styles.xml /tmp/app/android/app/src/main/res/values/styles.xml
           cp -a /tmp/source/android/app/src/main/assets/. /tmp/app/android/app/src/main/assets/
           sed -i 's/com\.example\.wifi_guard_ai/com.example.wifiguardai/g' /tmp/app/android/app/build.gradle.kts
           sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 23/' /tmp/app/android/app/build.gradle.kts
-          printf '%s\n' '' 'android {' '    androidResources {' '        noCompress += "tflite"' '    }' '}' '' 'dependencies {' '    implementation("androidx.core:core-ktx:1.15.0")' '    implementation("com.google.android.gms:play-services-tflite-java:16.5.0")' '    implementation("com.google.android.gms:play-services-tflite-support:16.5.0")' '}' >> /tmp/app/android/app/build.gradle.kts
+          printf '%s\n' '' 'android {' '    androidResources {' '        noCompress += "tflite"' '    }' '}' '' 'dependencies {' '    implementation("androidx.core:core-ktx:1.15.0")' '    implementation("androidx.fragment:fragment-ktx:1.8.9")' '    implementation("com.google.android.gms:play-services-tflite-java:16.5.0")' '    implementation("com.google.android.gms:play-services-tflite-support:16.5.0")' '}' >> /tmp/app/android/app/build.gradle.kts
           cat /tmp/app/android/app/build.gradle.kts
           cd /tmp/app
           flutter pub get
