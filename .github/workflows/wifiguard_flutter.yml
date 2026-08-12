@@ -20,6 +20,7 @@ jobs:
         run: |
           cp ci_wifiguard/main.dart /tmp/wifi_guard_preview/lib/main.dart
           cp ci_wifiguard/pubspec.yaml /tmp/wifi_guard_preview/pubspec.yaml
+          rm -rf /tmp/wifi_guard_preview/test
       - name: Analyze and build
         working-directory: /tmp/wifi_guard_preview
         run: |
