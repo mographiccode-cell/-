@@ -40,8 +40,9 @@ jobs:
           set -euxo pipefail
           flutter --version
           flutter create --platforms=android --org com.example --project-name wifi_guard_ai /tmp/app
-          rm -rf /tmp/app/lib
+          rm -rf /tmp/app/lib /tmp/app/test
           cp -a /tmp/source/lib /tmp/app/lib
+          cp -a /tmp/source/test /tmp/app/test
           cp /tmp/source/pubspec.yaml /tmp/app/pubspec.yaml
           cp /tmp/source/analysis_options.yaml /tmp/app/analysis_options.yaml
 
