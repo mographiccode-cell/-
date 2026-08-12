@@ -1,0 +1,40 @@
+name: WiFiGuard Flutter Preview
+on:
+  push:
+    branches: [wifiguardai-ci-20260812]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Flutter version
+        run: flutter --version
+      - name: Create Flutter scaffold
+        run: flutter create --platforms=web --project-name wifi_guard_ai_preview /tmp/wifi_guard_preview
+      - name: Overlay WiFiGuard UI
+        run: |
+          cp ci_wifiguard/main.dart /tmp/wifi_guard_preview/lib/main.dart
+          cp ci_wifiguard/pubspec.yaml /tmp/wifi_guard_preview/pubspec.yaml
+      - name: Analyze and build
+        working-directory: /tmp/wifi_guard_preview
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter build web --release
+      - name: Render screenshot
+        working-directory: /tmp/wifi_guard_preview
+        run: |
+          python3 -m http.server 8080 --directory build/web >/tmp/http.log 2>&1 &
+          sleep 3
+          google-chrome --headless --disable-gpu --no-sandbox --window-size=430,932 --screenshot=wifi_guard_ui.png http://127.0.0.1:8080
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wifiguard-flutter-preview
+          path: |
+            /tmp/wifi_guard_preview/wifi_guard_ui.png
+            /tmp/wifi_guard_preview/build/web
