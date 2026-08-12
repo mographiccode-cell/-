@@ -41,6 +41,7 @@ jobs:
           rm -rf /tmp/app/lib /tmp/app/test
           cp -a /tmp/source/lib /tmp/app/lib
           cp -a /tmp/source/test /tmp/app/test
+          cp ci_android/widget_test.dart /tmp/app/test/widget_test.dart
           cp /tmp/source/pubspec.yaml /tmp/app/pubspec.yaml
           cp /tmp/source/analysis_options.yaml /tmp/app/analysis_options.yaml
           rm -rf /tmp/app/android/app/src/main/kotlin
