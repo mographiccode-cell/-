@@ -13,12 +13,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -45,40 +43,16 @@ jobs:
           cp -a /tmp/source/test /tmp/app/test
           cp /tmp/source/pubspec.yaml /tmp/app/pubspec.yaml
           cp /tmp/source/analysis_options.yaml /tmp/app/analysis_options.yaml
-
           rm -rf /tmp/app/android/app/src/main/kotlin
           cp -a /tmp/source/android/app/src/main/kotlin /tmp/app/android/app/src/main/kotlin
           cp /tmp/source/android/app/src/main/AndroidManifest.xml /tmp/app/android/app/src/main/AndroidManifest.xml
           mkdir -p /tmp/app/android/app/src/main/res/values /tmp/app/android/app/src/main/assets
           cp /tmp/source/android/app/src/main/res/values/styles.xml /tmp/app/android/app/src/main/res/values/styles.xml
           cp -a /tmp/source/android/app/src/main/assets/. /tmp/app/android/app/src/main/assets/
-
-          # Keep Flutter 3.44.9's AGP 9-compatible Gradle file and only patch project values.
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('/tmp/app/android/app/build.gradle.kts')
-          s = p.read_text()
-          s = s.replace('namespace = "com.example.wifi_guard_ai"', 'namespace = "com.example.wifiguardai"')
-          s = s.replace('applicationId = "com.example.wifi_guard_ai"', 'applicationId = "com.example.wifiguardai"')
-          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 23')
-          s += '''
-
-android {
-    androidResources {
-        noCompress += "tflite"
-    }
-}
-
-dependencies {
-    implementation("androidx.core:core-ktx:1.15.0")
-    implementation("com.google.android.gms:play-services-tflite-java:16.5.0")
-    implementation("com.google.android.gms:play-services-tflite-support:16.5.0")
-}
-'''
-          p.write_text(s)
-          print(p.read_text())
-          PY
-
+          sed -i 's/com\.example\.wifi_guard_ai/com.example.wifiguardai/g' /tmp/app/android/app/build.gradle.kts
+          sed -i 's/minSdk = flutter\.minSdkVersion/minSdk = 23/' /tmp/app/android/app/build.gradle.kts
+          printf '%s\n' '' 'android {' '    androidResources {' '        noCompress += "tflite"' '    }' '}' '' 'dependencies {' '    implementation("androidx.core:core-ktx:1.15.0")' '    implementation("com.google.android.gms:play-services-tflite-java:16.5.0")' '    implementation("com.google.android.gms:play-services-tflite-support:16.5.0")' '}' >> /tmp/app/android/app/build.gradle.kts
+          cat /tmp/app/android/app/build.gradle.kts
           cd /tmp/app
           flutter pub get
           flutter analyze
@@ -95,11 +69,7 @@ dependencies {
       - name: Kotlin parser smoke test
         run: |
           set -euxo pipefail
-          kotlinc \
-            /tmp/source/android/app/src/main/kotlin/com/example/wifiguardai/security/DnsMessageParser.kt \
-            /tmp/source/android/app/src/main/kotlin/com/example/wifiguardai/security/IpDnsPacket.kt \
-            /tmp/source/tests/kotlin/ParserSmokeTest.kt \
-            -include-runtime -d /tmp/parser-test.jar
+          kotlinc /tmp/source/android/app/src/main/kotlin/com/example/wifiguardai/security/DnsMessageParser.kt /tmp/source/android/app/src/main/kotlin/com/example/wifiguardai/security/IpDnsPacket.kt /tmp/source/tests/kotlin/ParserSmokeTest.kt -include-runtime -d /tmp/parser-test.jar
           java -jar /tmp/parser-test.jar | tee /tmp/parser_test.log
 
       - name: Prepare KVM
@@ -128,19 +98,13 @@ dependencies {
             adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity|com.example.wifiguardai' | head -30 | tee /tmp/activity_state.txt
             adb exec-out screencap -p > /tmp/android_dashboard.png
             adb logcat -d -v threadtime > /tmp/logcat_full.txt
-            if grep -E 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai' /tmp/logcat_full.txt; then
-              echo 'Application crash detected in logcat'
-              exit 1
-            fi
+            if grep -E 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai' /tmp/logcat_full.txt; then exit 1; fi
             grep -E 'com\.example\.wifiguardai|flutter' /tmp/logcat_full.txt | tail -300 > /tmp/logcat_app.txt || true
 
       - name: Package tested project
         if: always()
         run: |
-          if [ -d /tmp/app ]; then
-            cd /tmp/app
-            zip -qr /tmp/WiFiGuardAI_Android_Scaffolded.zip . -x 'build/*' '.dart_tool/*' '.gradle/*'
-          fi
+          if [ -d /tmp/app ]; then cd /tmp/app && zip -qr /tmp/WiFiGuardAI_Android_Scaffolded.zip . -x 'build/*' '.dart_tool/*' '.gradle/*'; fi
 
       - uses: actions/upload-artifact@v4
         if: always()
