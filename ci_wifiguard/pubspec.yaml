@@ -1,0 +1,10 @@
+name: wifi_guard_ai_preview
+description: WiFi Guard AI Flutter CI preview
+publish_to: none
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+flutter:
+  uses-material-design: true
