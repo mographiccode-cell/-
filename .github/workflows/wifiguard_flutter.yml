@@ -32,7 +32,8 @@ jobs:
         run: |
           python3 -m http.server 8080 --directory build/web >/tmp/http.log 2>&1 &
           sleep 3
-          google-chrome --headless --disable-gpu --no-sandbox --window-size=430,932 --screenshot=wifi_guard_ui.png http://127.0.0.1:8080
+          google-chrome --headless=new --no-sandbox --disable-dev-shm-usage --window-size=430,932 --virtual-time-budget=12000 --run-all-compositor-stages-before-draw --screenshot=wifi_guard_ui.png http://127.0.0.1:8080
+          test -s wifi_guard_ui.png
       - uses: actions/upload-artifact@v4
         with:
           name: wifiguard-flutter-preview
