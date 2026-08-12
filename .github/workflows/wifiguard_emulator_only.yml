@@ -1,0 +1,80 @@
+name: WiFiGuard Final Emulator Validation
+on:
+  push:
+    branches: [wifiguardai-ci-20260812]
+    paths:
+      - '.github/workflows/wifiguard_emulator_only.yml'
+  workflow_dispatch:
+
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download APK from successful build stage
+        uses: actions/download-artifact@v4
+        with:
+          name: wifiguard-android-test-results
+          path: /tmp/prior
+          github-token: ${{ github.token }}
+          run-id: 31611296693
+
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          test -s /tmp/prior/app/build/app/outputs/flutter-apk/app-debug.apk
+          sha256sum /tmp/prior/app/build/app/outputs/flutter-apk/app-debug.apk | tee /tmp/apk_sha256.txt
+
+      - name: Prepare KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Install APK + cold launch + UI + logcat validation
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -eu
+            adb logcat -c
+            adb install -r /tmp/prior/app/build/app/outputs/flutter-apk/app-debug.apk
+            adb shell am force-stop com.example.wifiguardai
+            adb shell am start -W -n com.example.wifiguardai/.MainActivity | tee /tmp/am_start.txt
+            sleep 8
+            adb shell pidof com.example.wifiguardai | tee /tmp/app_pid.txt
+            test -s /tmp/app_pid.txt
+            adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity|com.example.wifiguardai' | head -30 | tee /tmp/activity_state.txt
+            grep -q 'topResumedActivity=.*com.example.wifiguardai/.MainActivity' /tmp/activity_state.txt
+            adb shell uiautomator dump /sdcard/wifiguard_ui.xml >/dev/null 2>&1 || true
+            adb pull /sdcard/wifiguard_ui.xml /tmp/wifiguard_ui.xml >/dev/null 2>&1 || true
+            adb exec-out screencap -p > /tmp/android_dashboard.png
+            test -s /tmp/android_dashboard.png
+            adb logcat -d -v threadtime > /tmp/logcat_full.txt
+            ! grep -Eq 'FATAL EXCEPTION|Process: com\.example\.wifiguardai.*has died|AndroidRuntime.*com\.example\.wifiguardai' /tmp/logcat_full.txt
+            grep -E 'com\.example\.wifiguardai|flutter' /tmp/logcat_full.txt | tail -300 > /tmp/logcat_app.txt || true
+            echo 'EMULATOR_RUNTIME_SMOKE_TEST=PASS' | tee /tmp/runtime_result.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wifiguard-final-runtime-results
+          if-no-files-found: warn
+          path: |
+            /tmp/prior/app/build/app/outputs/flutter-apk/app-debug.apk
+            /tmp/android_dashboard.png
+            /tmp/am_start.txt
+            /tmp/app_pid.txt
+            /tmp/activity_state.txt
+            /tmp/wifiguard_ui.xml
+            /tmp/logcat_app.txt
+            /tmp/logcat_full.txt
+            /tmp/apk_sha256.txt
+            /tmp/runtime_result.txt
