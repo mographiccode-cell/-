@@ -1,0 +1,77 @@
+name: Smart Shipping Compare Android APK
+
+on:
+  push:
+    branches:
+      - smart-shipping-compare-build-20260823
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore exact source bundle
+        run: |
+          mkdir -p smart-shipping-compare
+          cat .ci/ssc_parts/001 .ci/ssc_parts/002 .ci/ssc_parts/003 .ci/ssc_parts/004 .ci/ssc_parts/005 .ci/ssc_parts/006 | base64 -d > /tmp/ssc.tgz
+          tar -tzf /tmp/ssc.tgz
+          tar -xzf /tmp/ssc.tgz -C smart-shipping-compare
+          test -s smart-shipping-compare/lib/main.dart
+          test -s smart-shipping-compare/lib/core.dart
+          test -s smart-shipping-compare/test/core_test.dart
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.0'
+          channel: stable
+          cache: true
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Generate Android platform project
+        working-directory: smart-shipping-compare
+        run: |
+          rm -rf build_project
+          flutter create --platforms=android --project-name smart_shipping_compare build_project
+          rm -rf build_project/lib build_project/test
+          cp -r lib build_project/lib
+          cp -r test build_project/test
+          cp pubspec.yaml build_project/pubspec.yaml
+          cp analysis_options.yaml build_project/analysis_options.yaml
+          sed -i 's/android:label="smart_shipping_compare"/android:label="Smart Shipping Compare"/' build_project/android/app/src/main/AndroidManifest.xml
+
+      - name: Resolve dependencies
+        working-directory: smart-shipping-compare/build_project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: smart-shipping-compare/build_project
+        run: flutter analyze
+
+      - name: Unit and regression tests
+        working-directory: smart-shipping-compare/build_project
+        run: flutter test --reporter expanded
+
+      - name: Build installable release APK
+        working-directory: smart-shipping-compare/build_project
+        run: flutter build apk --release
+
+      - name: Verify APK exists
+        run: |
+          test -s smart-shipping-compare/build_project/build/app/outputs/flutter-apk/app-release.apk
+          sha256sum smart-shipping-compare/build_project/build/app/outputs/flutter-apk/app-release.apk
+          ls -lh smart-shipping-compare/build_project/build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartShippingCompare-APK
+          path: smart-shipping-compare/build_project/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
