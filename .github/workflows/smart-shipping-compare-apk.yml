@@ -26,6 +26,7 @@ jobs:
           test -s smart-shipping-compare/lib/main.dart
           test -s smart-shipping-compare/lib/core.dart
           test -s smart-shipping-compare/test/core_test.dart
+          python3 .ci/fix_smart_shipping_source.py smart-shipping-compare/lib/main.dart
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
