@@ -1,0 +1,58 @@
+name: Build DMV V2 Final
+
+on:
+  push:
+    branches:
+      - build-dmv-v2-final-20260827
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+      - name: Prepare app
+        run: |
+          git fetch origin build-deleted-message-vault-v2-20260827
+          flutter create --platforms=android --org com.mographiccode --project-name deleted_message_vault generated
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/pubspec.yaml > generated/pubspec.yaml
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/main.dart > generated/lib/main.dart
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/AndroidManifest.xml > generated/android/app/src/main/AndroidManifest.xml
+          rm -rf generated/android/app/src/main/kotlin/com/mographiccode/deleted_message_vault
+          mkdir -p generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault
+          cp dmv_v2/LocalMessageDatabaseV1.kt generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/LocalMessageDatabase.kt
+          cp dmv_v2/WhatsAppNotificationListenerV2.kt generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/WhatsAppNotificationListener.kt
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/MainActivityV2.kt > generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/MainActivity.kt
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/MediaArchiveDatabase.kt > generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/MediaArchiveDatabase.kt
+          git show origin/build-deleted-message-vault-v2-20260827:dmv_v2/MediaScanner.kt > generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/MediaScanner.kt
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('generated/android/app/build.gradle.kts')
+          s = p.read_text().replace('com.mographiccode.deleted_message_vault', 'com.mographiccode.deletedmessagevault')
+          s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 24')
+          p.write_text(s)
+          PY
+      - name: Analyze
+        working-directory: generated
+        run: |
+          flutter pub get
+          flutter analyze lib/main.dart
+      - name: Build APK
+        working-directory: generated
+        run: flutter build apk --release
+      - name: Verify APK
+        run: |
+          test -f generated/build/app/outputs/flutter-apk/app-release.apk
+          unzip -t generated/build/app/outputs/flutter-apk/app-release.apk | tail -n 2
+          sha256sum generated/build/app/outputs/flutter-apk/app-release.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deleted-message-vault-v2-apk
+          path: generated/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
