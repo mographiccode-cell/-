@@ -37,6 +37,19 @@ jobs:
           s = p.read_text().replace('com.mographiccode.deleted_message_vault', 'com.mographiccode.deletedmessagevault')
           s = s.replace('minSdk = flutter.minSdkVersion', 'minSdk = 24')
           p.write_text(s)
+
+          p = Path('generated/lib/main.dart')
+          s = p.read_text()
+          s = s.replace("body: map['body']?.toString() ?? '',", "body: map['body']?.toString() ?? map['text']?.toString() ?? '',")
+          s = s.replace('Image.file(file!,', 'Image.file(file,')
+          p.write_text(s)
+
+          p = Path('generated/android/app/src/main/kotlin/com/mographiccode/deletedmessagevault/MainActivity.kt')
+          s = p.read_text()
+          s = s.replace('getMessages(query, deletedOnly)', 'getMessages(query.orEmpty(), deletedOnly)')
+          s = s.replace('messages[index]["body"]', 'messages[index]["text"]')
+          s = s.replace('.getMessages(query.orEmpty(), deletedOnly)\n            .map', '.getMessages(query.orEmpty(), deletedOnly)\n            .filter { it["isDeletionSignal"] != true }\n            .map')
+          p.write_text(s)
           PY
       - name: Analyze
         working-directory: generated
