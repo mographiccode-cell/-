@@ -16,7 +16,6 @@ import android.provider.MediaStore
 import android.text.Html
 import android.webkit.MimeTypeMap
 import com.chaquo.python.Python
-import dev.ffmpegkit_maintained.ytdlp.DownloadProgressCallback
 import dev.ffmpegkit_maintained.ytdlp.YtDlp
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -35,14 +34,11 @@ class MainActivity : FlutterActivity() {
     private val channelName = "social_downloader/native"
     private var methodChannel: MethodChannel? = null
     private var initialShareConsumed = false
-    private val waiter = Executors.newCachedThreadPool()
+    private val worker = Executors.newCachedThreadPool()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        try {
-            YtDlp.init(applicationContext)
-        } catch (_: Exception) {
-        }
+        try { YtDlp.init(applicationContext) } catch (_: Exception) {}
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -97,13 +93,13 @@ class MainActivity : FlutterActivity() {
         if (workDir.exists()) workDir.deleteRecursively()
         workDir.mkdirs()
 
-        waiter.execute {
+        worker.execute {
             try {
                 val host = Uri.parse(url).host.orEmpty().lowercase(Locale.US)
 
                 if (host.contains("instagram.com")) {
                     try {
-                        emitProgress(0f, 0L, "استخراج رابط Instagram العام...")
+                        emitStage(2f, "محاولة استخراج فيديو Instagram العام...")
                         val media = extractInstagramPublicMedia(url)
                         if (media != null) {
                             val direct = downloadDirectMedia(
@@ -116,24 +112,23 @@ class MainActivity : FlutterActivity() {
                             return@execute
                         }
                     } catch (_: Exception) {
-                        // Fall through to yt-dlp's public Instagram extractor.
+                        // Continue to yt-dlp public extractor, still without login/cookies.
                     }
                 }
 
                 if (looksLikeDirectMediaUrl(url)) {
                     try {
-                        emitProgress(0f, 0L, "اتصال مباشر بالرابط...")
+                        emitStage(2f, "اتصال مباشر بالرابط...")
                         val direct = downloadDirectMedia(url, workDir, referer = url)
                         finishSuccess(direct, workDir, result)
                         return@execute
-                    } catch (_: Exception) {
-                    }
+                    } catch (_: Exception) {}
                 }
 
-                emitProgress(0f, 0L, "فحص الصيغ المتاحة...")
+                emitStage(4f, "فحص الصيغ المتاحة واختيار أفضل صيغة...")
                 YtDlp.init(applicationContext)
-
                 val run = executeWithStrategies(url, workDir)
+
                 if (!run.success) {
                     runOnUiThread {
                         result.success(
@@ -150,7 +145,7 @@ class MainActivity : FlutterActivity() {
                 val downloaded = when {
                     !run.finalFile.isNullOrBlank() -> File(run.finalFile)
                     !run.videoFile.isNullOrBlank() && !run.audioFile.isNullOrBlank() -> {
-                        emitProgress(94f, 0L, "دمج الصوت والصورة داخل التطبيق...")
+                        emitStage(94f, "دمج الصوت والصورة داخل التطبيق...")
                         val merged = File(workDir, "youtube_${System.currentTimeMillis()}.mp4")
                         muxVideoAndAudio(File(run.videoFile), File(run.audioFile), merged)
                     }
@@ -164,6 +159,7 @@ class MainActivity : FlutterActivity() {
                     return@execute
                 }
 
+                emitStage(98f, "حفظ الفيديو في مجلد التنزيلات...")
                 finishSuccess(downloaded, workDir, result)
             } catch (e: Exception) {
                 val message = e.cause?.message ?: e.message ?: e.javaClass.simpleName
@@ -179,11 +175,9 @@ class MainActivity : FlutterActivity() {
         val strategies = mutableListOf<JSONObject>()
 
         if (host.contains("youtube.com") || host.contains("youtu.be")) {
-            strategies += youtubeOptions("android_vr")
-            strategies += youtubeOptions("web_safari")
-            strategies += youtubeOptions("mweb")
-            strategies += youtubeOptions("web_embedded")
-            strategies += youtubeOptions("tv_embedded")
+            listOf("android_vr", "web_safari", "mweb", "web_embedded", "tv_embedded").forEach { client ->
+                strategies += youtubeOptions(client)
+            }
         } else {
             strategies += baseOptions().apply {
                 put("http_headers", JSONObject().apply {
@@ -197,7 +191,7 @@ class MainActivity : FlutterActivity() {
         var last = PythonRunResult(false, "تعذر تنزيل الرابط.")
         for ((index, options) in strategies.withIndex()) {
             if (index > 0) {
-                emitProgress(0f, 0L, "تجربة مصدر صيغ بديل...")
+                emitStage((6 + index * 2).toFloat(), "تجربة مصدر صيغ بديل...")
                 workDir.listFiles()?.forEach { file -> if (file.isFile) file.delete() }
             }
             last = executePythonYtDlp(url, workDir, options)
@@ -227,10 +221,10 @@ class MainActivity : FlutterActivity() {
             put("restrictfilenames", true)
             put("overwrites", true)
             put("continuedl", true)
-            put("socket_timeout", 30)
-            put("retries", 5)
-            put("fragment_retries", 5)
-            put("extractor_retries", 3)
+            put("socket_timeout", 35)
+            put("retries", 6)
+            put("fragment_retries", 6)
+            put("extractor_retries", 4)
             put("concurrent_fragment_downloads", 1)
             put("force_ipv4", true)
             put("cachedir", false)
@@ -243,16 +237,17 @@ class MainActivity : FlutterActivity() {
         val outputTemplate = File(workDir, "%(title).80s.%(ext)s").absolutePath
         val python = Python.getInstance()
         val pyDir = File(filesDir, "python_ext").apply { mkdirs() }
-        val runnerFile = File(pyDir, "social_runner_v6.py")
+        val runnerFile = File(pyDir, "social_runner_v7.py")
         if (!runnerFile.exists() || runnerFile.readText() != pythonRunnerSource) {
             runnerFile.writeText(pythonRunnerSource)
         }
         python.getModule("sys").get("path")?.callAttr("insert", 0, pyDir.absolutePath)
-        val runner = python.getModule("social_runner_v6")
-        val callback = DownloadProgressCallback { progress, eta, line ->
-            emitProgress(progress, eta, line ?: "")
-        }
-        val json = runner.callAttr("execute", url, outputTemplate, options.toString(), callback).toString()
+        val runner = python.getModule("social_runner_v7")
+
+        // Intentionally no Kotlin/Java callback is passed into Python. Previous versions
+        // could be converted by Chaquopy into a proxy object without onProgressUpdate,
+        // aborting otherwise-valid downloads. Stages are reported from Android instead.
+        val json = runner.callAttr("execute", url, outputTemplate, options.toString()).toString()
         val obj = JSONObject(json)
         return PythonRunResult(
             success = obj.optBoolean("success", false),
@@ -265,10 +260,10 @@ class MainActivity : FlutterActivity() {
 
     private fun muxVideoAndAudio(videoFile: File, audioFile: File, outputFile: File): File {
         if (outputFile.exists()) outputFile.delete()
-
         val videoExtractor = MediaExtractor()
         val audioExtractor = MediaExtractor()
         var muxer: MediaMuxer? = null
+
         try {
             videoExtractor.setDataSource(videoFile.absolutePath)
             audioExtractor.setDataSource(audioFile.absolutePath)
@@ -292,7 +287,6 @@ class MainActivity : FlutterActivity() {
             val outVideoTrack = muxer.addTrack(videoFormat)
             val outAudioTrack = muxer.addTrack(audioFormat)
             muxer.start()
-
             copyTrack(videoExtractor, muxer, outVideoTrack)
             copyTrack(audioExtractor, muxer, outAudioTrack)
             muxer.stop()
@@ -312,8 +306,7 @@ class MainActivity : FlutterActivity() {
 
     private fun findTrack(extractor: MediaExtractor, mimePrefix: String): Int {
         for (index in 0 until extractor.trackCount) {
-            val format = extractor.getTrackFormat(index)
-            val mime = format.getString(MediaFormat.KEY_MIME).orEmpty()
+            val mime = extractor.getTrackFormat(index).getString(MediaFormat.KEY_MIME).orEmpty()
             if (mime.startsWith(mimePrefix)) return index
         }
         return -1
@@ -348,14 +341,9 @@ class MainActivity : FlutterActivity() {
                 val fetched = fetchInstagramPage(page)
                 val mediaUrl = parseInstagramVideoUrl(fetched.html)
                 if (!mediaUrl.isNullOrBlank()) {
-                    return InstagramMedia(
-                        url = mediaUrl,
-                        referer = "$normalized/",
-                        cookies = fetched.cookies,
-                    )
+                    return InstagramMedia(mediaUrl, "$normalized/", fetched.cookies)
                 }
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
         return null
     }
@@ -437,6 +425,7 @@ class MainActivity : FlutterActivity() {
 
     private fun finishSuccess(downloaded: File, workDir: File, result: MethodChannel.Result) {
         val publishedUri = publishToDownloads(downloaded)
+        emitStage(100f, "اكتمل التحميل")
         runOnUiThread {
             result.success(
                 mapOf(
@@ -450,11 +439,11 @@ class MainActivity : FlutterActivity() {
         workDir.deleteRecursively()
     }
 
-    private fun emitProgress(progress: Float, eta: Long, line: String) {
+    private fun emitStage(progress: Float, line: String) {
         runOnUiThread {
             methodChannel?.invokeMethod(
                 "downloadProgress",
-                mapOf("progress" to progress, "eta" to eta, "line" to line)
+                mapOf("progress" to progress, "eta" to 0L, "line" to line)
             )
         }
     }
@@ -471,9 +460,7 @@ class MainActivity : FlutterActivity() {
         return try {
             val path = Uri.parse(rawUrl).path?.lowercase(Locale.US).orEmpty()
             listOf(".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".3gp").any { path.endsWith(it) }
-        } catch (_: Exception) {
-            false
-        }
+        } catch (_: Exception) { false }
     }
 
     private fun downloadDirectMedia(
@@ -513,7 +500,7 @@ class MainActivity : FlutterActivity() {
                             val percent = ((copied * 100L) / total).toInt().coerceIn(0, 100)
                             if (percent != lastPercent) {
                                 lastPercent = percent
-                                emitProgress(percent.toFloat(), 0L, "تنزيل مباشر...")
+                                emitStage(percent.toFloat(), "تنزيل مباشر...")
                             }
                         }
                     }
@@ -529,9 +516,7 @@ class MainActivity : FlutterActivity() {
     private fun extensionFor(rawUrl: String, contentType: String?): String {
         val pathExt = MimeTypeMap.getFileExtensionFromUrl(rawUrl)?.lowercase(Locale.US)
         if (!pathExt.isNullOrBlank() && pathExt.length <= 5) return pathExt
-        val fromMime = contentType
-            ?.substringBefore(';')
-            ?.trim()
+        val fromMime = contentType?.substringBefore(';')?.trim()
             ?.let { MimeTypeMap.getSingleton().getExtensionFromMimeType(it) }
         return fromMime ?: "mp4"
     }
@@ -568,15 +553,13 @@ class MainActivity : FlutterActivity() {
             message.contains("Requested format is not available", ignoreCase = true) ->
                 "لم يعثر المحرك على صيغة قابلة للتنزيل من هذا المصدر بعد فحص الصيغ المتاحة."
             message.contains("login", ignoreCase = true) && message.contains("Instagram", ignoreCase = true) ->
-                "Instagram لم يسمح بالوصول المجهول لهذا الرابط من الشبكة الحالية. جُرّبت صفحة المنشور العامة ونسخة embed ومحرك Instagram بدون تسجيل دخول."
-            message.contains("private", ignoreCase = true) ->
-                "المحتوى خاص أو غير متاح للعامة."
+                "Instagram لم يسمح بالوصول المجهول لهذا الرابط. جُرّبت صفحة المنشور العامة ونسخة embed ومحرك Instagram بدون تسجيل دخول."
+            message.contains("private", ignoreCase = true) -> "المحتوى خاص أو غير متاح للعامة."
             message.contains("Errno 101", ignoreCase = true) ||
                 message.contains("Network is unreachable", ignoreCase = true) ||
                 message.contains("No route to host", ignoreCase = true) ->
                 "تعذر الوصول إلى خادم الفيديو من مسار الشبكة الحالي."
-            message.contains("timed out", ignoreCase = true) ->
-                "انتهت مهلة الاتصال بالخادم بعد عدة محاولات."
+            message.contains("timed out", ignoreCase = true) -> "انتهت مهلة الاتصال بالخادم بعد عدة محاولات."
             else -> if (message.isBlank()) "تعذر تنزيل الرابط." else message.take(900)
         }
     }
@@ -637,66 +620,39 @@ def _logger(logs):
     return Logger()
 
 
-def _hook(progress_callback, base, span, label):
-    def hook(d):
-        if progress_callback is None:
-            return
-        try:
-            if d.get('status') == 'downloading':
-                raw = float(str(d.get('_percent_str', '0')).strip().replace('%', '') or 0)
-                pct = base + (raw * span / 100.0)
-                eta = int(d.get('eta') or 0)
-                progress_callback.onProgressUpdate(float(pct), eta, label)
-            elif d.get('status') == 'finished':
-                progress_callback.onProgressUpdate(float(base + span), 0, label)
-        except Exception:
-            pass
-    return hook
-
-
-def _download_exact(url, opts, fmt_id, outtmpl, logs, callback, base, span, label):
+def _download_exact(url, opts, fmt_id, outtmpl, logs):
     local = copy.deepcopy(opts)
     local['format'] = str(fmt_id)
     local['outtmpl'] = outtmpl
     local['logger'] = _logger(logs)
-    local['progress_hooks'] = [_hook(callback, base, span, label)]
     with yt_dlp.YoutubeDL(local) as ydl:
         code = ydl.download([url])
     if code:
         raise RuntimeError('yt-dlp exit code %s' % code)
 
 
-def _download_youtube(url, output_template, opts, logs, callback):
+def _download_youtube(url, output_template, opts, logs):
     workdir = os.path.dirname(output_template)
     probe = copy.deepcopy(opts)
     probe.pop('format', None)
     probe['logger'] = _logger(logs)
-
-    if callback is not None:
-        callback.onProgressUpdate(1.0, 0, 'قراءة صيغ YouTube المتاحة...')
 
     with yt_dlp.YoutubeDL(probe) as ydl:
         info = ydl.extract_info(url, download=False)
 
     formats = [f for f in (info.get('formats') or []) if isinstance(f, dict)]
     combined = [f for f in formats if _has_video(f) and _has_audio(f)]
+    combined_mp4 = [f for f in combined if f.get('ext') == 'mp4']
 
-    if combined:
-        chosen = max(combined, key=_score)
+    if combined_mp4 or combined:
+        chosen = max(combined_mp4 or combined, key=_score)
         _download_exact(
             url, opts, chosen.get('format_id'),
-            os.path.join(workdir, 'video_single.%(ext)s'),
-            logs, callback, 4.0, 92.0,
-            'تنزيل فيديو YouTube...')
+            os.path.join(workdir, 'video_single.%(ext)s'), logs)
         final_file = _latest_file(workdir, 'video_single')
         if not final_file:
             raise RuntimeError('Combined format downloaded but output file was not found')
-        return {
-            'success': True,
-            'final_file': final_file,
-            'selected_format': str(chosen.get('format_id')),
-            'height': int(chosen.get('height') or 0),
-        }
+        return {'success': True, 'final_file': final_file}
 
     videos = [f for f in formats if _has_video(f) and not _has_audio(f)]
     audios = [f for f in formats if _has_audio(f) and not _has_video(f)]
@@ -716,38 +672,24 @@ def _download_youtube(url, output_template, opts, logs, callback):
     if avc and aac:
         video = max(avc, key=_score)
         audio = max(aac, key=_score)
-        _download_exact(
-            url, opts, video.get('format_id'),
-            os.path.join(workdir, 'video_only.%(ext)s'),
-            logs, callback, 4.0, 72.0,
-            'تنزيل صورة YouTube...')
-        _download_exact(
-            url, opts, audio.get('format_id'),
-            os.path.join(workdir, 'audio_only.%(ext)s'),
-            logs, callback, 76.0, 17.0,
-            'تنزيل صوت YouTube...')
+        _download_exact(url, opts, video.get('format_id'),
+                        os.path.join(workdir, 'video_only.%(ext)s'), logs)
+        _download_exact(url, opts, audio.get('format_id'),
+                        os.path.join(workdir, 'audio_only.%(ext)s'), logs)
         video_file = _latest_file(workdir, 'video_only')
         audio_file = _latest_file(workdir, 'audio_only')
         if not video_file or not audio_file:
-            raise RuntimeError('Separate YouTube streams downloaded but output files were not found')
-        return {
-            'success': True,
-            'video_file': video_file,
-            'audio_file': audio_file,
-            'video_format': str(video.get('format_id')),
-            'audio_format': str(audio.get('format_id')),
-            'height': int(video.get('height') or 0),
-        }
+            raise RuntimeError('Separate streams downloaded but output files were not found')
+        return {'success': True, 'video_file': video_file, 'audio_file': audio_file}
 
     raise RuntimeError('No downloadable combined format or Android-muxable MP4/AAC streams were found')
 
 
-def _download_generic(url, output_template, opts, logs, callback):
+def _download_generic(url, output_template, opts, logs):
     local = copy.deepcopy(opts)
     local.pop('format', None)
     local['outtmpl'] = output_template
     local['logger'] = _logger(logs)
-    local['progress_hooks'] = [_hook(callback, 0.0, 100.0, 'تنزيل الفيديو...')]
     with yt_dlp.YoutubeDL(local) as ydl:
         code = ydl.download([url])
     if code:
@@ -763,15 +705,15 @@ def _download_generic(url, output_template, opts, logs, callback):
     return {'success': True, 'final_file': max(candidates, key=os.path.getmtime)}
 
 
-def execute(url, output_template, options_json, progress_callback=None):
+def execute(url, output_template, options_json):
     opts = json.loads(options_json or '{}')
     logs = []
     try:
         host = (url.split('/')[2] if '://' in url else '').lower()
         if 'youtube.com' in host or 'youtu.be' in host:
-            result = _download_youtube(url, output_template, opts, logs, progress_callback)
+            result = _download_youtube(url, output_template, opts, logs)
         else:
-            result = _download_generic(url, output_template, opts, logs, progress_callback)
+            result = _download_generic(url, output_template, opts, logs)
         result['log'] = '\n'.join(logs[-50:])
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
