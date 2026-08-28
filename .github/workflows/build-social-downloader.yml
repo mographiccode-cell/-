@@ -1,0 +1,65 @@
+name: Build Social Downloader APK
+
+on:
+  push:
+    branches:
+      - build-social-downloader-20260828
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create clean Flutter Android project
+        run: |
+          rm -rf /tmp/social_downloader
+          flutter create --platforms=android --org com.mographiccode --project-name social_downloader /tmp/social_downloader
+          cp social_downloader_app/pubspec.yaml /tmp/social_downloader/pubspec.yaml
+          cp social_downloader_app/lib/main.dart /tmp/social_downloader/lib/main.dart
+          rm -rf /tmp/social_downloader/test
+          cp -r social_downloader_app/test /tmp/social_downloader/test
+          cp social_downloader_app/android/app/build.gradle.kts /tmp/social_downloader/android/app/build.gradle.kts
+          cp social_downloader_app/android/app/src/main/AndroidManifest.xml /tmp/social_downloader/android/app/src/main/AndroidManifest.xml
+          rm -rf /tmp/social_downloader/android/app/src/main/kotlin/com/mographiccode/social_downloader
+          mkdir -p /tmp/social_downloader/android/app/src/main/kotlin/com/mographiccode/social_downloader
+          cp social_downloader_app/android/app/src/main/kotlin/com/mographiccode/social_downloader/MainActivity.kt /tmp/social_downloader/android/app/src/main/kotlin/com/mographiccode/social_downloader/MainActivity.kt
+
+      - name: Resolve dependencies
+        working-directory: /tmp/social_downloader
+        run: flutter pub get
+
+      - name: Analyze Flutter code
+        working-directory: /tmp/social_downloader
+        run: flutter analyze
+
+      - name: Run Flutter tests
+        working-directory: /tmp/social_downloader
+        run: flutter test
+
+      - name: Build release APK arm64
+        working-directory: /tmp/social_downloader
+        run: flutter build apk --release --target-platform android-arm64
+
+      - name: Prepare artifact
+        run: |
+          cp /tmp/social_downloader/build/app/outputs/flutter-apk/app-release.apk /tmp/SocialDownloader-v1.0.0-arm64.apk
+          sha256sum /tmp/SocialDownloader-v1.0.0-arm64.apk | tee /tmp/SHA256.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocialDownloader-APK
+          path: |
+            /tmp/SocialDownloader-v1.0.0-arm64.apk
+            /tmp/SHA256.txt
+          if-no-files-found: error
