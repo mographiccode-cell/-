@@ -243,8 +243,8 @@ class _HomePageState extends State<HomePage> {
       await _reloadHistory();
     }
 
-    if (mounted && completedUri != null && completedUri!.isNotEmpty) {
-      await _openPlayer(completedUri!, completedName ?? 'الفيديو');
+    if (mounted && completedUri != null && completedUri.isNotEmpty) {
+      await _openPlayer(completedUri, completedName ?? 'الفيديو');
     }
   }
 
