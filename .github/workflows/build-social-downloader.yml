@@ -9,7 +9,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,20 +46,70 @@ jobs:
         working-directory: /tmp/social_downloader
         run: flutter test
 
-      - name: Build release APK arm64
+      - name: Build universal release APK
         working-directory: /tmp/social_downloader
-        run: flutter build apk --release --target-platform android-arm64
+        run: flutter build apk --release
 
-      - name: Prepare artifact
+      - name: Re-sign APK with v1 v2 v3 and verify package
+        shell: bash
         run: |
-          cp /tmp/social_downloader/build/app/outputs/flutter-apk/app-release.apk /tmp/SocialDownloader-v1.0.0-arm64.apk
-          sha256sum /tmp/SocialDownloader-v1.0.0-arm64.apk | tee /tmp/SHA256.txt
+          set -euo pipefail
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+          AAPT="$BUILD_TOOLS/aapt"
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          INPUT=/tmp/social_downloader/build/app/outputs/flutter-apk/app-release.apk
+          ALIGNED=/tmp/SocialDownloader-aligned.apk
+          OUTPUT=/tmp/SocialDownloader-v1.0.1-universal.apk
+
+          "$ZIPALIGN" -f -p 4 "$INPUT" "$ALIGNED"
+          "$APKSIGNER" sign \
+            --ks "$HOME/.android/debug.keystore" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --v4-signing-enabled false \
+            --out "$OUTPUT" \
+            "$ALIGNED"
+
+          "$APKSIGNER" verify --verbose --print-certs "$OUTPUT"
+          "$AAPT" dump badging "$OUTPUT" | tee /tmp/aapt-badging.txt
+          unzip -t "$OUTPUT"
+          sha256sum "$OUTPUT" | tee /tmp/SHA256.txt
+
+      - name: Smoke-test install and launch on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            set -e
+            APK=/tmp/SocialDownloader-v1.0.1-universal.apk
+            adb install -r "$APK"
+            adb shell pm path com.mographiccode.social_downloader
+            adb shell am start -W -n com.mographiccode.social_downloader/.MainActivity
+            sleep 5
+            adb shell dumpsys activity activities | grep -m1 com.mographiccode.social_downloader
+            adb shell am force-stop com.mographiccode.social_downloader
+            adb shell am start -W -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://storage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4" -n com.mographiccode.social_downloader/.MainActivity
+            sleep 10
+            if adb logcat -d -t 500 | grep -E "FATAL EXCEPTION|AndroidRuntime" | grep -q "com.mographiccode.social_downloader"; then
+              echo "Fatal runtime crash detected"
+              adb logcat -d -t 500
+              exit 1
+            fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SocialDownloader-APK
+          name: SocialDownloader-APK-FIXED
           path: |
-            /tmp/SocialDownloader-v1.0.0-arm64.apk
+            /tmp/SocialDownloader-v1.0.1-universal.apk
             /tmp/SHA256.txt
+            /tmp/aapt-badging.txt
           if-no-files-found: error
