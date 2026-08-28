@@ -83,10 +83,20 @@ jobs:
           unzip -t "$OUTPUT"
           sha256sum "$OUTPUT" | tee /tmp/SHA256.txt
 
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SocialDownloader-APK-FIXED
+          path: |
+            /tmp/SocialDownloader-v1.0.1-universal.apk
+            /tmp/SHA256.txt
+            /tmp/aapt-badging.txt
+          if-no-files-found: error
+
       - name: Smoke-test install and launch on Android emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 29
           arch: x86_64
           target: google_apis
           disable-animations: true
@@ -106,13 +116,3 @@ jobs:
               adb logcat -d -t 500
               exit 1
             fi
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: SocialDownloader-APK-FIXED
-          path: |
-            /tmp/SocialDownloader-v1.0.1-universal.apk
-            /tmp/SHA256.txt
-            /tmp/aapt-badging.txt
-          if-no-files-found: error
