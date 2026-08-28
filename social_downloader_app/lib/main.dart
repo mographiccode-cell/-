@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import 'package:video_player/video_player.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +53,8 @@ class _HomePageState extends State<HomePage> {
   String _eta = '';
   String _status = 'جاهز';
   String? _activeUrl;
+  String? _lastVideoUri;
+  String? _lastVideoName;
   List<DownloadItem> _history = const [];
 
   @override
@@ -83,8 +86,7 @@ class _HomePageState extends State<HomePage> {
   Future<dynamic> _handleNativeCall(MethodCall call) async {
     switch (call.method) {
       case 'onSharedUrl':
-        final text = call.arguments?.toString() ?? '';
-        await _handleSharedText(text);
+        await _handleSharedText(call.arguments?.toString() ?? '');
         break;
       case 'downloadProgress':
         final args = Map<String, dynamic>.from(call.arguments as Map);
@@ -93,8 +95,7 @@ class _HomePageState extends State<HomePage> {
           _progress = ((args['progress'] as num?)?.toDouble() ?? 0)
               .clamp(0.0, 100.0)
               .toDouble();
-          final eta = args['eta'];
-          _eta = eta == null ? '' : eta.toString();
+          _eta = args['eta']?.toString() ?? '';
           final line = args['line']?.toString().trim();
           if (line != null && line.isNotEmpty) _status = line;
         });
@@ -108,20 +109,55 @@ class _HomePageState extends State<HomePage> {
       _showMessage('لم أجد رابطًا صالحًا في المشاركة.');
       return;
     }
-
     _urlController.text = url;
     if (_downloading && _activeUrl == url) return;
-
     setState(() => _tabIndex = 0);
     await _startDownload(url, fromShare: true);
+  }
+
+  Future<Map<String, dynamic>?> _invokeDownload(String url, int id) {
+    return _channel.invokeMapMethod<String, dynamic>('download', {
+      'url': url,
+      'requestId': id.toString(),
+    });
+  }
+
+  Future<bool> _loginInsideApp(String site) async {
+    final label = site == 'instagram' ? 'Instagram' : 'YouTube';
+    final shouldLogin = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text('$label يطلب جلسة دخول'),
+            content: Text(
+              'سيفتح تسجيل الدخول داخل التطبيق نفسه. بعد تسجيل الدخول اضغط «حفظ الجلسة والعودة»، ثم سيعيد التطبيق المحاولة تلقائيًا.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('إلغاء'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('تسجيل الدخول داخل التطبيق'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!shouldLogin || !mounted) return false;
+
+    try {
+      return await _channel.invokeMethod<bool>('loginSite', {'site': site}) ?? false;
+    } catch (_) {
+      _showMessage('تعذر فتح تسجيل الدخول داخل التطبيق.');
+      return false;
+    }
   }
 
   Future<void> _startDownload(String rawUrl, {bool fromShare = false}) async {
     final url = extractFirstUrl(rawUrl) ?? rawUrl.trim();
     final uri = Uri.tryParse(url);
-    if (uri == null ||
-        !uri.hasScheme ||
-        !(uri.scheme == 'http' || uri.scheme == 'https')) {
+    if (uri == null || !uri.hasScheme || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       _showMessage('أدخل رابط http أو https صحيحًا.');
       return;
     }
@@ -131,11 +167,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     final platform = detectPlatform(url);
-    final id = await _db.insert(
-      url: url,
-      platform: platform,
-      status: 'downloading',
-    );
+    final id = await _db.insert(url: url, platform: platform, status: 'downloading');
 
     if (!mounted) return;
     setState(() {
@@ -143,30 +175,46 @@ class _HomePageState extends State<HomePage> {
       _activeUrl = url;
       _progress = 0;
       _eta = '';
-      _status = fromShare
-          ? 'تم استلام الرابط من المشاركة — بدأ التحميل'
-          : 'بدأ التحميل';
+      _status = fromShare ? 'تم استلام الرابط من المشاركة — بدأ التحميل' : 'بدأ التحميل';
     });
     await _reloadHistory();
 
-    try {
-      final result = await _channel.invokeMapMethod<String, dynamic>('download', {
-        'url': url,
-        'requestId': id.toString(),
-      });
+    String? completedUri;
+    String? completedName;
 
-      final success = result?['success'] == true;
-      if (success) {
+    try {
+      Map<String, dynamic>? result = await _invokeDownload(url, id);
+
+      if (result?['success'] != true && result?['needsAuth'] == true) {
+        final site = result?['authSite']?.toString();
+        if (site == 'instagram' || site == 'youtube') {
+          if (mounted && await _loginInsideApp(site!)) {
+            if (mounted) {
+              setState(() {
+                _progress = 0;
+                _status = 'تم حفظ الجلسة — إعادة محاولة التحميل...';
+              });
+            }
+            result = await _invokeDownload(url, id);
+          }
+        }
+      }
+
+      if (result?['success'] == true) {
+        completedUri = result?['uri']?.toString();
+        completedName = result?['fileName']?.toString();
         await _db.finish(
           id,
           status: 'completed',
-          fileName: result?['fileName']?.toString(),
-          fileUri: result?['uri']?.toString(),
+          fileName: completedName,
+          fileUri: completedUri,
         );
         if (mounted) {
           setState(() {
             _progress = 100;
             _status = 'اكتمل التحميل وحُفظ في Download/SocialDownloader';
+            _lastVideoUri = completedUri;
+            _lastVideoName = completedName;
           });
           _showMessage('تم التحميل بنجاح.');
         }
@@ -194,6 +242,18 @@ class _HomePageState extends State<HomePage> {
       }
       await _reloadHistory();
     }
+
+    if (mounted && completedUri != null && completedUri!.isNotEmpty) {
+      await _openPlayer(completedUri!, completedName ?? 'الفيديو');
+    }
+  }
+
+  Future<void> _openPlayer(String uri, String title) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => InAppVideoPlayerPage(uri: uri, title: title),
+      ),
+    );
   }
 
   Future<void> _reloadHistory() async {
@@ -206,7 +266,12 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          duration: const Duration(seconds: 5),
+        ),
+      );
   }
 
   @override
@@ -227,23 +292,14 @@ class _HomePageState extends State<HomePage> {
           ? const Center(child: CircularProgressIndicator())
           : IndexedStack(
               index: _tabIndex,
-              children: [
-                _buildDownloader(),
-                _buildHistory(),
-              ],
+              children: [_buildDownloader(), _buildHistory()],
             ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tabIndex,
         onDestinationSelected: (value) => setState(() => _tabIndex = value),
         destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.download_rounded),
-            label: 'تحميل',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.history_rounded),
-            label: 'السجل',
-          ),
+          NavigationDestination(icon: Icon(Icons.download_rounded), label: 'تحميل'),
+          NavigationDestination(icon: Icon(Icons.history_rounded), label: 'السجل'),
         ],
       ),
     );
@@ -264,10 +320,7 @@ class _HomePageState extends State<HomePage> {
             children: [
               Icon(Icons.ios_share_rounded, size: 34),
               SizedBox(height: 12),
-              Text(
-                'شارك الرابط مباشرة',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-              ),
+              Text('شارك الرابط مباشرة', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
               SizedBox(height: 8),
               Text(
                 'من YouTube أو Facebook أو Instagram أو X اضغط مشاركة، ثم اختر هذا التطبيق. سيبدأ تنزيل الرابط العام تلقائيًا.',
@@ -286,14 +339,30 @@ class _HomePageState extends State<HomePage> {
             labelText: 'رابط الفيديو',
             hintText: 'https://...',
             prefixIcon: const Icon(Icons.link_rounded),
-            suffixIcon: IconButton(
-              tooltip: 'لصق',
-              onPressed: () async {
-                final data = await Clipboard.getData(Clipboard.kTextPlain);
-                final text = data?.text ?? '';
-                if (text.isNotEmpty) _urlController.text = text;
-              },
-              icon: const Icon(Icons.content_paste_rounded),
+            suffixIcon: SizedBox(
+              width: 96,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  IconButton(
+                    tooltip: 'حذف الرابط',
+                    onPressed: () {
+                      _urlController.clear();
+                      FocusScope.of(context).unfocus();
+                    },
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'لصق',
+                    onPressed: () async {
+                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      final text = data?.text ?? '';
+                      if (text.isNotEmpty) _urlController.text = text;
+                    },
+                    icon: const Icon(Icons.content_paste_rounded),
+                  ),
+                ],
+              ),
             ),
             filled: true,
             fillColor: Colors.white,
@@ -305,26 +374,19 @@ class _HomePageState extends State<HomePage> {
         ),
         const SizedBox(height: 14),
         FilledButton.icon(
-          onPressed: _downloading
-              ? null
-              : () => _startDownload(_urlController.text),
+          onPressed: _downloading ? null : () => _startDownload(_urlController.text),
           icon: const Icon(Icons.download_rounded),
           label: Text(_downloading ? 'جارٍ التحميل...' : 'تحميل الآن'),
           style: FilledButton.styleFrom(
             minimumSize: const Size.fromHeight(54),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(18),
-            ),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
           ),
         ),
         const SizedBox(height: 22),
         if (_downloading || _progress > 0)
           Container(
             padding: const EdgeInsets.all(18),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(20),
-            ),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -343,9 +405,7 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                LinearProgressIndicator(
-                  value: _progress <= 0 ? null : _progress / 100,
-                ),
+                LinearProgressIndicator(value: _progress <= 0 ? null : _progress / 100),
                 if (_eta.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   Text('الوقت المتبقي التقريبي: $_eta ثانية'),
@@ -353,9 +413,22 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
           ),
+        if (_lastVideoUri != null) ...[
+          const SizedBox(height: 18),
+          Card(
+            elevation: 0,
+            child: ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.play_arrow_rounded)),
+              title: Text(_lastVideoName ?? 'الفيديو المحمّل'),
+              subtitle: const Text('تشغيل الفيديو داخل التطبيق'),
+              trailing: const Icon(Icons.chevron_left_rounded),
+              onTap: () => _openPlayer(_lastVideoUri!, _lastVideoName ?? 'الفيديو'),
+            ),
+          ),
+        ],
         const SizedBox(height: 18),
         const Text(
-          'يدعم التطبيق الروابط العامة التي يستطيع محرك yt-dlp الوصول إليها. لا يحاول تجاوز DRM أو المحتوى المدفوع أو الحماية الخاصة.',
+          'للمحتوى العام أولًا. إذا طلب Instagram أو YouTube جلسة دخول من الموقع نفسه، يمكن تسجيل الدخول من داخل التطبيق وإعادة المحاولة. لا يتم تجاوز DRM أو المحتوى الخاص.',
           style: TextStyle(fontSize: 13, height: 1.6, color: Colors.black54),
         ),
       ],
@@ -363,11 +436,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildHistory() {
-    if (_history.isEmpty) {
-      return const Center(
-        child: Text('لا توجد تنزيلات بعد.'),
-      );
-    }
+    if (_history.isEmpty) return const Center(child: Text('لا توجد تنزيلات بعد.'));
 
     return RefreshIndicator(
       onRefresh: _reloadHistory,
@@ -379,26 +448,23 @@ class _HomePageState extends State<HomePage> {
           final item = _history[index];
           final completed = item.status == 'completed';
           final failed = item.status == 'failed';
+          final playable = completed && (item.fileUri?.isNotEmpty ?? false);
           return Card(
             elevation: 0,
             child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: 8,
-              ),
+              onTap: playable ? () => _openPlayer(item.fileUri!, item.fileName ?? 'الفيديو') : null,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               leading: CircleAvatar(
                 child: Icon(
                   completed
-                      ? Icons.check_rounded
+                      ? Icons.play_arrow_rounded
                       : failed
                           ? Icons.error_outline_rounded
                           : Icons.downloading_rounded,
                 ),
               ),
               title: Text(
-                item.fileName?.isNotEmpty == true
-                    ? item.fileName!
-                    : item.platform,
+                item.fileName?.isNotEmpty == true ? item.fileName! : item.platform,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -408,10 +474,151 @@ class _HomePageState extends State<HomePage> {
                 overflow: TextOverflow.ellipsis,
                 textDirection: TextDirection.ltr,
               ),
+              trailing: playable ? const Icon(Icons.play_circle_outline_rounded) : null,
               isThreeLine: true,
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class InAppVideoPlayerPage extends StatefulWidget {
+  const InAppVideoPlayerPage({super.key, required this.uri, required this.title});
+
+  final String uri;
+  final String title;
+
+  @override
+  State<InAppVideoPlayerPage> createState() => _InAppVideoPlayerPageState();
+}
+
+class _InAppVideoPlayerPageState extends State<InAppVideoPlayerPage> {
+  late final VideoPlayerController _controller;
+  bool _ready = false;
+  String? _error;
+  bool _muted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.contentUri(Uri.parse(widget.uri));
+    _controller.initialize().then((_) {
+      if (!mounted) return;
+      setState(() => _ready = true);
+      _controller.play();
+    }).catchError((Object e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _seekBy(int seconds) async {
+    final position = await _controller.position ?? Duration.zero;
+    final duration = _controller.value.duration;
+    var target = position + Duration(seconds: seconds);
+    if (target < Duration.zero) target = Duration.zero;
+    if (target > duration) target = duration;
+    await _controller.seekTo(target);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Center(
+          child: _error != null
+              ? Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('تعذر تشغيل الفيديو داخل التطبيق.\n$_error', style: const TextStyle(color: Colors.white)),
+                )
+              : !_ready
+                  ? const CircularProgressIndicator()
+                  : Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Expanded(
+                          child: Center(
+                            child: AspectRatio(
+                              aspectRatio: _controller.value.aspectRatio > 0 ? _controller.value.aspectRatio : 16 / 9,
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  VideoPlayer(_controller),
+                                  ValueListenableBuilder<VideoPlayerValue>(
+                                    valueListenable: _controller,
+                                    builder: (context, value, _) => IconButton.filledTonal(
+                                      iconSize: 44,
+                                      onPressed: () => value.isPlaying ? _controller.pause() : _controller.play(),
+                                      icon: Icon(value.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(18, 8, 18, 20),
+                          child: Column(
+                            children: [
+                              VideoProgressIndicator(
+                                _controller,
+                                allowScrubbing: true,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  IconButton(
+                                    color: Colors.white,
+                                    tooltip: 'رجوع 10 ثوانٍ',
+                                    onPressed: () => _seekBy(-10),
+                                    icon: const Icon(Icons.replay_10_rounded),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  ValueListenableBuilder<VideoPlayerValue>(
+                                    valueListenable: _controller,
+                                    builder: (context, value, _) => IconButton.filled(
+                                      iconSize: 36,
+                                      onPressed: () => value.isPlaying ? _controller.pause() : _controller.play(),
+                                      icon: Icon(value.isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  IconButton(
+                                    color: Colors.white,
+                                    tooltip: 'تقديم 10 ثوانٍ',
+                                    onPressed: () => _seekBy(10),
+                                    icon: const Icon(Icons.forward_10_rounded),
+                                  ),
+                                  const SizedBox(width: 16),
+                                  IconButton(
+                                    color: Colors.white,
+                                    tooltip: _muted ? 'تشغيل الصوت' : 'كتم الصوت',
+                                    onPressed: () {
+                                      setState(() => _muted = !_muted);
+                                      _controller.setVolume(_muted ? 0 : 1);
+                                    },
+                                    icon: Icon(_muted ? Icons.volume_off_rounded : Icons.volume_up_rounded),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+        ),
       ),
     );
   }
@@ -425,18 +632,10 @@ String? extractFirstUrl(String text) {
 
 String detectPlatform(String url) {
   final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
-  if (host.contains('youtube.com') || host.contains('youtu.be')) {
-    return 'YouTube';
-  }
+  if (host.contains('youtube.com') || host.contains('youtu.be')) return 'YouTube';
   if (host.contains('instagram.com')) return 'Instagram';
-  if (host.contains('facebook.com') || host.contains('fb.watch')) {
-    return 'Facebook';
-  }
-  if (host == 'x.com' ||
-      host.endsWith('.x.com') ||
-      host.contains('twitter.com')) {
-    return 'X';
-  }
+  if (host.contains('facebook.com') || host.contains('fb.watch')) return 'Facebook';
+  if (host == 'x.com' || host.endsWith('.x.com') || host.contains('twitter.com')) return 'X';
   if (host.contains('tiktok.com')) return 'TikTok';
   return host.isEmpty ? 'رابط' : host;
 }
@@ -445,8 +644,7 @@ String formatDate(String value) {
   final parsed = DateTime.tryParse(value)?.toLocal();
   if (parsed == null) return value;
   String two(int n) => n.toString().padLeft(2, '0');
-  return '${parsed.year}-${two(parsed.month)}-${two(parsed.day)} '
-      '${two(parsed.hour)}:${two(parsed.minute)}';
+  return '${parsed.year}-${two(parsed.month)}-${two(parsed.day)} ${two(parsed.hour)}:${two(parsed.minute)}';
 }
 
 class DownloadItem {
@@ -509,11 +707,7 @@ class LocalHistoryDb {
     );
   }
 
-  Future<int> insert({
-    required String url,
-    required String platform,
-    required String status,
-  }) async {
+  Future<int> insert({required String url, required String platform, required String status}) async {
     return _database!.insert('downloads', {
       'url': url,
       'platform': platform,
