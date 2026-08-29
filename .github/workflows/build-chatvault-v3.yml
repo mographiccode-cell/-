@@ -25,8 +25,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/chatvault_payload
-          base64 -d chatvault_v3/payload.b64 > /tmp/chatvault_payload.zip
+          cat chatvault_v3/chunks/payload_* > /tmp/chatvault_payload.b64
+          wc -c /tmp/chatvault_payload.b64
+          test "$(wc -c < /tmp/chatvault_payload.b64)" -eq 41864
+          base64 -d /tmp/chatvault_payload.b64 > /tmp/chatvault_payload.zip
           unzip -t /tmp/chatvault_payload.zip
 
       - name: Create Flutter Android scaffold
