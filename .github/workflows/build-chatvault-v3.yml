@@ -41,9 +41,14 @@ jobs:
           flutter create --platforms=android --org com.mographiccode --project-name chatvault .
           unzip -qo /tmp/chatvault_payload.zip -d .
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          DB='android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt'
+          sed -i 's/arrayOf(title.ifBlank/arrayOf<Any?>(title.ifBlank/' "$DB"
+          sed -i 's/arrayOf(mediaPath, mimeType, messageType, messageId)/arrayOf<Any?>(mediaPath, mimeType, messageType, messageId)/' "$DB"
           grep -q 'com.mographiccode.chatvault' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'android.permission.BIND_NOTIFICATION_LISTENER_SERVICE' android/app/src/main/AndroidManifest.xml
           grep -q '@drawable/chatvault_icon' android/app/src/main/AndroidManifest.xml
+          grep -q 'arrayOf<Any?>(title.ifBlank' "$DB"
+          grep -q 'arrayOf<Any?>(mediaPath' "$DB"
 
       - name: Flutter doctor
         run: flutter doctor -v
