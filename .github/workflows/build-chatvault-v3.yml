@@ -1,0 +1,85 @@
+name: Build ChatVault v3
+
+on:
+  push:
+    branches:
+      - build-chatvault-v3-20260829
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Verify and decode source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/chatvault_payload
+          base64 -d chatvault_v3/payload.b64 > /tmp/chatvault_payload.zip
+          unzip -t /tmp/chatvault_payload.zip
+
+      - name: Create Flutter Android scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_v3/project
+          mkdir -p chatvault_v3/project
+          cd chatvault_v3/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_payload.zip -d .
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          grep -q 'com.mographiccode.chatvault' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'android.permission.BIND_NOTIFICATION_LISTENER_SERVICE' android/app/src/main/AndroidManifest.xml
+          grep -q '@drawable/chatvault_icon' android/app/src/main/AndroidManifest.xml
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Get dependencies
+        working-directory: chatvault_v3/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_v3/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_v3/project
+        run: flutter test
+
+      - name: Build release APK
+        working-directory: chatvault_v3/project
+        run: flutter build apk --release
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='chatvault_v3/project/build/app/outputs/flutter-apk/app-release.apk'
+          test -s "$APK"
+          unzip -t "$APK" >/tmp/apk-unzip-test.txt
+          sha256sum "$APK" | tee chatvault_v3/ChatVault-v3.0.0.sha256
+          cp "$APK" chatvault_v3/ChatVault-v3.0.0-release.apk
+          file chatvault_v3/ChatVault-v3.0.0-release.apk
+          ls -lh chatvault_v3/ChatVault-v3.0.0-release.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-v3.0.0-APK
+          path: |
+            chatvault_v3/ChatVault-v3.0.0-release.apk
+            chatvault_v3/ChatVault-v3.0.0.sha256
+          if-no-files-found: error
+          retention-days: 7
