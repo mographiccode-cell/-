@@ -1,0 +1,118 @@
+name: Build ChatVault Next v5.1.0 Gemini
+
+on:
+  push:
+    branches:
+      - build-chatvault-next-v51-20260901
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct v3.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/chatvault_v31_payload.b64
+          test "$(wc -c < /tmp/chatvault_v31_payload.b64)" -eq 55880
+          base64 -d /tmp/chatvault_v31_payload.b64 > /tmp/chatvault_v31_payload.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/chatvault_v31_payload.zip' | sha256sum -c -
+          unzip -t /tmp/chatvault_v31_payload.zip
+
+      - name: Create ChatVault Next v5.1 project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_next51/project
+          mkdir -p chatvault_next51/project
+          cd chatvault_next51/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_v31_payload.zip -d .
+
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+
+          patch -p1 < ../../chatvault_v41/patch_db.diff
+          patch -p1 < ../../chatvault_v41/patch_activity.diff
+          patch -p1 < ../../chatvault_v41/patch_ui.diff
+          patch -p1 < ../../chatvault_v41/patch_manifest.diff
+          patch -p1 < ../../chatvault_v41/patch_pubspec.diff
+
+          cat ../../chatvault_v51/ui_parts/part_* > /tmp/chatvault_v51_ui.diff
+          cat ../../chatvault_v51/gemini_parts/part_* > android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          patch -p1 < ../../chatvault_v51/patch_activity.diff
+          patch -p1 < /tmp/chatvault_v51_ui.diff
+          patch -p1 < ../../chatvault_v51/patch_manifest.diff
+          patch -p1 < ../../chatvault_v51/patch_pubspec.diff
+
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.next"/' android/app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+          sed -i 's/if (!mounted || matches.isEmpty) return;/if (!context.mounted || matches.isEmpty) return;/' lib/main.dart
+
+          grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
+          grep -q 'version: 5.1.0+3' pubspec.yaml
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.READ_MEDIA_' android/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.READ_CONTACTS' android/app/src/main/AndroidManifest.xml
+          ! grep -q 'android.permission.READ_EXTERNAL_STORAGE' android/app/src/main/AndroidManifest.xml
+          grep -q 'class GeminiManager' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          grep -q 'AndroidKeyStore' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          grep -q '/v1beta/interactions' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          grep -q 'geminiAnalyzeConversation' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'startVoicePrompt' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'تحليل المحادثة بـ Gemini' lib/main.dart
+
+      - name: Get dependencies
+        working-directory: chatvault_next51/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_next51/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_next51/project
+        run: flutter test
+
+      - name: Build unsigned release APK
+        working-directory: chatvault_next51/project
+        run: flutter build apk --release
+
+      - name: Verify unsigned APK structure and alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='chatvault_next51/project/build/app/outputs/flutter-apk/app-release.apk'
+          test -s "$APK"
+          ZA=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
+          "$ZA" -c -P 16 -v 4 "$APK" | tee chatvault_next51/zipalign-verify.txt
+          grep -q 'Verification successful' chatvault_next51/zipalign-verify.txt
+          unzip -t "$APK" >/tmp/chatvault-v51-apk-unzip.txt
+          cp "$APK" chatvault_next51/ChatVault-Next-v5.1.0-unsigned.apk
+          sha256sum chatvault_next51/ChatVault-Next-v5.1.0-unsigned.apk | tee chatvault_next51/ChatVault-Next-v5.1.0-unsigned.sha256
+
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Next-v5.1.0-GEMINI-UNSIGNED
+          path: |
+            chatvault_next51/ChatVault-Next-v5.1.0-unsigned.apk
+            chatvault_next51/ChatVault-Next-v5.1.0-unsigned.sha256
+            chatvault_next51/zipalign-verify.txt
+          if-no-files-found: error
+          retention-days: 7
