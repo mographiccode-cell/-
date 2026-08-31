@@ -1,0 +1,70 @@
++                includeMedia: includeMedia,
++              );
++              if (!sheetContext.mounted) return;
++              Navigator.pop(sheetContext);
++              if (mounted) await _showGeminiReport(result);
++            } on PlatformException catch (e) {
++              if (sheetContext.mounted) {
++                setSheetState(() => running = false);
++                ScaffoldMessenger.of(sheetContext).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر تحليل المحادثة.')));
++              }
++            } catch (e) {
++              if (sheetContext.mounted) {
++                setSheetState(() => running = false);
++                ScaffoldMessenger.of(sheetContext).showSnackBar(SnackBar(content: Text('تعذر التحليل: $e')));
++              }
++            }
++          }
++
++          return Directionality(
++            textDirection: TextDirection.rtl,
++            child: SafeArea(
++              child: Padding(
++                padding: EdgeInsets.fromLTRB(16, 12, 16, 16 + MediaQuery.of(sheetContext).viewInsets.bottom),
++                child: SingleChildScrollView(
++                  child: Column(
++                    mainAxisSize: MainAxisSize.min,
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Center(child: Container(width: 44, height: 4, decoration: BoxDecoration(color: _muted.withValues(alpha: .35), borderRadius: BorderRadius.circular(12)))),
++                      const SizedBox(height: 14),
++                      const Row(children: [Icon(Icons.auto_awesome_rounded, color: _accent), SizedBox(width: 9), Text('تحليل المحادثة بـ Gemini', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900))]),
++                      const SizedBox(height: 5),
++                      Text('سيتم إرسال المحادثة التي اخترتها فقط إلى Gemini عند الضغط على «تحليل الآن».', style: TextStyle(color: _muted.withValues(alpha: .95), fontSize: 11.5, height: 1.45)),
++                      const SizedBox(height: 14),
++                      Wrap(
++                        spacing: 7,
++                        runSpacing: 7,
++                        children: [
++                          ActionChip(label: const Text('ملخص شامل'), onPressed: running ? null : () => setSheetState(() => promptController.text = 'لخص المحادثة بشكل شامل، واستخرج القرارات والمهام والمواعيد وأهم النقاط.')),
++                          ActionChip(label: const Text('المهام والالتزامات'), onPressed: running ? null : () => setSheetState(() => promptController.text = 'استخرج جميع المهام والالتزامات: من قالها، لمن، ومتى، وما حالتها إن أمكن.')),
++                          ActionChip(label: const Text('تحليل القروب'), onPressed: running ? null : () => setSheetState(() => promptController.text = 'حلل نشاط القروب: أكثر المشاركين، المواضيع الأساسية، القرارات، نقاط الخلاف، وأهم الرسائل.')),
++                          ActionChip(label: const Text('المشاعر والنبرة'), onPressed: running ? null : () => setSheetState(() => promptController.text = 'حلل نبرة ومشاعر المحادثة وتغيرها مع الوقت، مع أمثلة مختصرة وبدون مبالغة.')),
++                        ],
++                      ),
++                      const SizedBox(height: 12),
++                      TextField(
++                        controller: promptController,
++                        minLines: 3,
++                        maxLines: 7,
++                        enabled: !running,
++                        decoration: InputDecoration(
++                          labelText: 'ماذا تريد من Gemini؟',
++                          hintText: 'مثال: استخرج كل المواعيد والمهام التي تخصني...',
++                          suffixIcon: IconButton(
++                            tooltip: 'إملاء الطلب صوتيًا',
++                            onPressed: running
++                                ? null
++                                : () async {
++                                    try {
++                                      final spoken = await NativeBridge.startVoicePrompt();
++                                      if (spoken.trim().isNotEmpty && sheetContext.mounted) setSheetState(() => promptController.text = spoken.trim());
++                                    } on PlatformException catch (e) {
++                                      if (sheetContext.mounted) ScaffoldMessenger.of(sheetContext).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر الإدخال الصوتي.')));
++                                    }
++                                  },
++                            icon: const Icon(Icons.mic_none_rounded),
++                          ),
++                        ),
++                      ),
++                      const SizedBox(height: 12),
