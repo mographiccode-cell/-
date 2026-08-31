@@ -1,0 +1,294 @@
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -229,6 +229,28 @@
+       }) ??
+       false;
+ 
++  static Future<bool> pickAndShareFile(String packageName, String mimeType) async =>
++      await _channel.invokeMethod<bool>('pickAndShareFile', <String, dynamic>{
++        'packageName': packageName,
++        'mimeType': mimeType,
++      }) ??
++      false;
++
++  static Future<Map<String, dynamic>> autoImportLegacyIfNeeded() async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('autoImportLegacyIfNeeded') ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> importLegacyInstalledData() async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('importLegacyInstalledData') ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> importLegacyDatabaseFile() async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('importLegacyDatabaseFile') ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
+   static Future<void> clearData() async => _channel.invokeMethod<void>('clearData');
+ }
+ 
+@@ -553,6 +575,15 @@
+       });
+     });
+     _refreshPermissions();
++    _attemptLegacyAutoImport();
++  }
++
++  Future<void> _attemptLegacyAutoImport() async {
++    try {
++      final report = await NativeBridge.autoImportLegacyIfNeeded();
++      final imported = _int(report['messages']) + _int(report['media']);
++      if (imported > 0 && mounted) setState(() => _refreshToken++);
++    } catch (_) {}
+   }
+ 
+   @override
+@@ -1118,6 +1149,48 @@
+     }
+   }
+ 
++  Future<void> _pickAndShareAttachment() async {
++    final mime = await showModalBottomSheet<String>(
++      context: context,
++      backgroundColor: _panel,
++      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
++      builder: (sheetContext) => Directionality(
++        textDirection: TextDirection.rtl,
++        child: SafeArea(
++          child: Padding(
++            padding: const EdgeInsets.fromLTRB(14, 12, 14, 18),
++            child: Column(
++              mainAxisSize: MainAxisSize.min,
++              children: [
++                Container(width: 42, height: 4, decoration: BoxDecoration(color: _muted.withValues(alpha: .35), borderRadius: BorderRadius.circular(20))),
++                const SizedBox(height: 14),
++                const Text('إرسال عبر واتساب', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
++                const SizedBox(height: 4),
++                const Text('اختر نوع الملف، ثم اختر المستلم داخل WhatsApp.', style: TextStyle(color: _muted, fontSize: 11.5)),
++                const SizedBox(height: 14),
++                Row(
++                  children: [
++                    Expanded(child: _AttachmentChoice(icon: Icons.image_rounded, label: 'صورة', onTap: () => Navigator.pop(sheetContext, 'image/*'))),
++                    const SizedBox(width: 8),
++                    Expanded(child: _AttachmentChoice(icon: Icons.videocam_rounded, label: 'فيديو', onTap: () => Navigator.pop(sheetContext, 'video/*'))),
++                    const SizedBox(width: 8),
++                    Expanded(child: _AttachmentChoice(icon: Icons.graphic_eq_rounded, label: 'صوت', onTap: () => Navigator.pop(sheetContext, 'audio/*'))),
++                    const SizedBox(width: 8),
++                    Expanded(child: _AttachmentChoice(icon: Icons.attach_file_rounded, label: 'ملف', onTap: () => Navigator.pop(sheetContext, '*/*'))),
++                  ],
++                ),
++              ],
++            ),
++          ),
++        ),
++      ),
++    );
++    if (mime == null || !mounted) return;
++    final ok = await NativeBridge.pickAndShareFile(widget.conversation.packageName, mime);
++    if (!mounted || ok) return;
++    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر فتح WhatsApp لإرسال الملف.')));
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final searchQuery = _chatSearch.text.trim();
+@@ -1217,6 +1290,12 @@
+               color: _panel,
+               child: Row(
+                 children: [
++                  IconButton.filledTonal(
++                    onPressed: _pickAndShareAttachment,
++                    tooltip: 'إرسال صورة أو فيديو أو صوت أو ملف',
++                    icon: const Icon(Icons.attach_file_rounded),
++                  ),
++                  const SizedBox(width: 6),
+                   Expanded(
+                     child: TextField(
+                       controller: _controller,
+@@ -1261,7 +1340,9 @@
+     final bubble = outgoing ? const Color(0xFF075E54) : _panel2;
+     return Align(
+       alignment: outgoing ? Alignment.centerLeft : Alignment.centerRight,
+-      child: Container(
++      child: GestureDetector(
++        onLongPress: () => _showMessageActions(context, message),
++        child: Container(
+         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * .82),
+         margin: const EdgeInsets.symmetric(vertical: 3),
+         padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+@@ -1308,11 +1389,74 @@
+             ),
+           ],
+         ),
++        ),
+       ),
+     );
+   }
+ }
+ 
++Future<void> _showMessageActions(BuildContext context, ChatMessage message) async {
++  await showModalBottomSheet<void>(
++    context: context,
++    backgroundColor: _panel,
++    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
++    builder: (sheetContext) => Directionality(
++      textDirection: TextDirection.rtl,
++      child: SafeArea(
++        child: Padding(
++          padding: const EdgeInsets.fromLTRB(12, 10, 12, 16),
++          child: Column(
++            mainAxisSize: MainAxisSize.min,
++            children: [
++              ListTile(
++                leading: const Icon(Icons.copy_rounded, color: _accent),
++                title: const Text('نسخ الرسالة'),
++                subtitle: Text(message.text, maxLines: 2, overflow: TextOverflow.ellipsis),
++                onTap: () async {
++                  await Clipboard.setData(ClipboardData(text: message.text));
++                  if (!sheetContext.mounted) return;
++                  Navigator.pop(sheetContext);
++                  if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم نسخ الرسالة.')));
++                },
++              ),
++              if (message.senderPhone != null)
++                ListTile(
++                  leading: const Icon(Icons.phone_outlined, color: _accent),
++                  title: const Text('نسخ الرقم'),
++                  subtitle: Text(message.senderPhone!, textDirection: TextDirection.ltr),
++                  onTap: () async {
++                    await Clipboard.setData(ClipboardData(text: message.senderPhone!));
++                    if (!sheetContext.mounted) return;
++                    Navigator.pop(sheetContext);
++                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تم نسخ الرقم.')));
++                  },
++                ),
++            ],
++          ),
++        ),
++      ),
++    ),
++  );
++}
++
++class _AttachmentChoice extends StatelessWidget {
++  const _AttachmentChoice({required this.icon, required this.label, required this.onTap});
++  final IconData icon;
++  final String label;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) => InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(16),
++        child: Container(
++          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 6),
++          decoration: BoxDecoration(color: _panel2, borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFF183B47))),
++          child: Column(children: [Icon(icon, color: _accent, size: 25), const SizedBox(height: 7), Text(label, style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w700))]),
++        ),
++      );
++}
++
+ class _LinkifiedHighlightedText extends StatelessWidget {
+   const _LinkifiedHighlightedText({required this.text, this.query = ''});
+   final String text;
+@@ -2000,6 +2144,64 @@
+     }
+   }
+ 
++  Future<void> _importLegacyRoot() async {
++    if (_working) return;
++    setState(() => _working = true);
++    try {
++      final report = await NativeBridge.importLegacyInstalledData();
++      if (!mounted) return;
++      await _showImportResult(report, automatic: true);
++      await widget.onChanged();
++    } on PlatformException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر استيراد البيانات القديمة.')));
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _importLegacyFile() async {
++    if (_working) return;
++    setState(() => _working = true);
++    try {
++      final report = await NativeBridge.importLegacyDatabaseFile();
++      if (!mounted) return;
++      if (report['cancelled'] == true) return;
++      await _showImportResult(report, automatic: false);
++      await widget.onChanged();
++    } on PlatformException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر استيراد قاعدة البيانات.')));
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _showImportResult(Map<String, dynamic> report, {required bool automatic}) async {
++    final success = _bool(report['success']);
++    final already = _bool(report['alreadyImported']) || _int(report['alreadyImportedPackages']) > 0;
++    final messages = _int(report['messages']);
++    final conversations = _int(report['conversations']);
++    final media = _int(report['media']);
++    final error = report['error']?.toString().trim() ?? '';
++    await showDialog<void>(
++      context: context,
++      builder: (_) => AlertDialog(
++        title: Text(success ? 'اكتمل دمج البيانات' : 'لم يكتمل الاستيراد'),
++        content: Text(
++          success
++              ? already && messages == 0 && conversations == 0 && media == 0
++                  ? 'هذه القاعدة سبق استيرادها، لذلك لم تتم إضافة نسخ مكررة.'
++                  : 'تم دمج $conversations محادثة و$messages رسالة و$media سجل وسائط مع بيانات Stable الحالية بدون حذف الموجود.'
++              : error.isNotEmpty
++                  ? error
++                  : automatic
++                      ? 'لم يتم العثور على نسخة قديمة قابلة للاستيراد تلقائيًا.'
++                      : 'تعذر قراءة ملف قاعدة البيانات المحدد.',
++        ),
++        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسنًا'))],
++      ),
++    );
++  }
++
+   Future<void> _clear() async {
+     final approved = await showDialog<bool>(
+       context: context,
+@@ -2059,6 +2261,24 @@
+           },
+         ),
+         const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.move_to_inbox_rounded,
++          title: 'استيراد بيانات ChatVault القديمة',
++          subtitle: 'يدمج v3.0 وv3.1 مع قاعدة Stable الحالية بدون حذف أو استبدال. عند توفر Root يتم نسخ قاعدة البيانات والوسائط تلقائيًا.',
++          status: false,
++          action: 'استيراد تلقائي',
++          onTap: _working ? null : _importLegacyRoot,
++        ),
++        const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.storage_rounded,
++          title: 'استيراد ملف chatvault.db',
++          subtitle: 'استخدمه إذا كان لديك ملف قاعدة بيانات مستخرج من نسخة سابقة. يتم الدمج مع منع تكرار الرسائل.',
++          status: false,
++          action: 'اختيار الملف',
++          onTap: _working ? null : _importLegacyFile,
++        ),
++        const SizedBox(height: 9),
+         Container(
+           padding: const EdgeInsets.all(14),
+           decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18)),
+@@ -2091,7 +2311,7 @@
+           label: const Text('حذف كل بيانات ChatVault المحلية', style: TextStyle(color: Color(0xFFFF6577))),
+         ),
+         const SizedBox(height: 14),
+-        const Center(child: Text('ChatVault 3.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
++        const Center(child: Text('ChatVault Stable 4.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
+       ],
+     );
+   }
