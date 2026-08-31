@@ -23,18 +23,22 @@ jobs:
           test -n "$APKSIGNER"
           test -n "$ZIPALIGN"
           TOOL_DIR=$(dirname "$APKSIGNER")
-          mkdir -p exported/build-tools
+          mkdir -p exported/build-tools/runtime-libs
           cp "$APKSIGNER" exported/build-tools/apksigner
           cp "$ZIPALIGN" exported/build-tools/zipalign
           cp -R "$TOOL_DIR/lib" exported/build-tools/lib
+          ldd "$ZIPALIGN" | tee exported/build-tools/zipalign-ldd.txt
+          ldd "$ZIPALIGN" | awk '/=> \/|^\// {for(i=1;i<=NF;i++) if ($i ~ /^\//) print $i}' | sort -u | while read -r lib; do
+            cp -L "$lib" exported/build-tools/runtime-libs/ || true
+          done
           chmod +x exported/build-tools/apksigner exported/build-tools/zipalign
           exported/build-tools/apksigner --version
-          exported/build-tools/zipalign -h >/dev/null || true
+          LD_LIBRARY_PATH="$PWD/exported/build-tools/runtime-libs:${LD_LIBRARY_PATH:-}" exported/build-tools/zipalign -h >/dev/null || true
 
       - name: Upload signing tools
         uses: actions/upload-artifact@v4
         with:
-          name: android-apksigner-tools
+          name: android-apksigner-tools-with-runtime
           path: exported/build-tools
           if-no-files-found: error
           retention-days: 1
