@@ -1,0 +1,124 @@
+        val name = fileJson.optString("name")
+        val uri = fileJson.optString("uri")
+        var state = fileJson.optString("state")
+        if (state.equals("PROCESSING", true) && name.isNotBlank()) {
+            repeat(30) {
+                Thread.sleep(2_000)
+                val meta = requestJson("GET", "$API_BASE/v1beta/$name", apiKey, null, readTimeoutMs = 30_000)
+                if (meta.code in 200..299) {
+                    val m = JSONObject(meta.body)
+                    state = m.optString("state")
+                    if (state.equals("ACTIVE", true)) return RemoteFile(name, m.optString("uri", uri), mime)
+                    if (state.equals("FAILED", true)) error("فشل Gemini في معالجة الملف ${file.name}.")
+                }
+            }
+        }
+        return RemoteFile(name, uri, mime)
+    }
+
+    private fun deleteRemoteFile(apiKey: String, name: String) {
+        if (name.isBlank()) return
+        requestJson("DELETE", "$API_BASE/v1beta/$name", apiKey, null, readTimeoutMs = 30_000)
+    }
+
+    private fun interactionType(mime: String): String = when {
+        mime.startsWith("image/") -> "image"
+        mime.startsWith("audio/") -> "audio"
+        mime.startsWith("video/") -> "video"
+        else -> "document"
+    }
+
+    private fun extractInteractionText(json: JSONObject): String {
+        val direct = json.optString("output_text")
+        if (direct.isNotBlank()) return direct
+        val pieces = mutableListOf<String>()
+        val steps = json.optJSONArray("steps")
+        if (steps != null) {
+            for (i in 0 until steps.length()) {
+                val step = steps.optJSONObject(i) ?: continue
+                if (step.optString("type") != "model_output") continue
+                val content = step.optJSONArray("content") ?: continue
+                for (j in 0 until content.length()) {
+                    val part = content.optJSONObject(j) ?: continue
+                    if (part.optString("type") == "text") part.optString("text").takeIf { it.isNotBlank() }?.let(pieces::add)
+                }
+            }
+        }
+        if (pieces.isNotEmpty()) return pieces.joinToString("\n")
+        val outputs = json.optJSONArray("outputs")
+        if (outputs != null) {
+            for (i in 0 until outputs.length()) {
+                val part = outputs.optJSONObject(i) ?: continue
+                part.optString("text").takeIf { it.isNotBlank() }?.let(pieces::add)
+            }
+        }
+        return pieces.joinToString("\n")
+    }
+
+    private data class HttpResult(val code: Int, val body: String)
+
+    private fun requestJson(
+        method: String,
+        url: String,
+        apiKey: String,
+        body: String?,
+        readTimeoutMs: Int = 90_000,
+    ): HttpResult {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.requestMethod = method
+        connection.connectTimeout = 30_000
+        connection.readTimeout = readTimeoutMs
+        connection.setRequestProperty("x-goog-api-key", apiKey)
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.setRequestProperty("Accept", "application/json")
+        if (body != null) {
+            connection.doOutput = true
+            connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
+        }
+        val code = connection.responseCode
+        val response = readBody(connection)
+        connection.disconnect()
+        return HttpResult(code, response)
+    }
+
+    private fun readBody(connection: HttpURLConnection): String {
+        val stream = if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream
+        return stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+    }
+
+    private fun extractError(body: String): String = runCatching {
+        val json = JSONObject(body)
+        json.optJSONObject("error")?.optString("message")?.takeIf { it.isNotBlank() }
+            ?: json.optString("message").takeIf { it.isNotBlank() }
+            ?: body.take(600)
+    }.getOrDefault(body.take(600).ifBlank { "خطأ غير معروف من Gemini API." })
+
+    private fun keyOrder(preferredId: String?): List<Pair<StoredKey, String>> {
+        val keys = loadKeys()
+        val active = preferredId?.takeIf { it.isNotBlank() } ?: prefs.getString(PREF_ACTIVE, null)
+        val ordered = keys.sortedBy { if (it.id == active) 0 else 1 }
+        return ordered.mapNotNull { item -> runCatching { item to decrypt(item) }.getOrNull() }
+    }
+
+    private fun loadKeys(): List<StoredKey> {
+        val raw = prefs.getString(PREF_KEYS, "[]") ?: "[]"
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(
+                        StoredKey(
+                            id = o.optString("id"),
+                            label = o.optString("label"),
+                            encrypted = o.optString("encrypted"),
+                            iv = o.optString("iv"),
+                            createdAt = o.optLong("createdAt"),
+                        )
+                    )
+                }
+            }.filter { it.id.isNotBlank() && it.encrypted.isNotBlank() && it.iv.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveKeys(keys: List<StoredKey>) {
