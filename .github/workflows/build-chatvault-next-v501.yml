@@ -1,0 +1,116 @@
+name: Build ChatVault Next v5.0.1 Permission Light
+
+on:
+  push:
+    branches:
+      - build-chatvault-next-v501-20260831
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct v3.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/chatvault_v31_payload.b64
+          test "$(wc -c < /tmp/chatvault_v31_payload.b64)" -eq 55880
+          base64 -d /tmp/chatvault_v31_payload.b64 > /tmp/chatvault_v31_payload.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/chatvault_v31_payload.zip' | sha256sum -c -
+          unzip -t /tmp/chatvault_v31_payload.zip
+
+      - name: Create permission-light ChatVault Next project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_next501/project
+          mkdir -p chatvault_next501/project
+          cd chatvault_next501/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_v31_payload.zip -d .
+
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+
+          patch -p1 < ../../chatvault_v41/patch_db.diff
+          patch -p1 < ../../chatvault_v41/patch_activity.diff
+          patch -p1 < ../../chatvault_v41/patch_ui.diff
+          patch -p1 < ../../chatvault_v41/patch_manifest.diff
+          patch -p1 < ../../chatvault_v41/patch_pubspec.diff
+
+          sed -i 's/version: 4.1.0+11/version: 5.0.1+2/' pubspec.yaml
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.next"/' android/app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+          sed -i 's/android:label="ChatVault"/android:label="ChatVault Next"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/if (!mounted || matches.isEmpty) return;/if (!context.mounted || matches.isEmpty) return;/' lib/main.dart
+
+          # Permission-light build: no dangerous runtime permissions in the manifest.
+          sed -i '/android.permission.READ_EXTERNAL_STORAGE/d' android/app/src/main/AndroidManifest.xml
+          sed -i '/android.permission.READ_MEDIA_IMAGES/d' android/app/src/main/AndroidManifest.xml
+          sed -i '/android.permission.READ_MEDIA_VIDEO/d' android/app/src/main/AndroidManifest.xml
+          sed -i '/android.permission.READ_MEDIA_AUDIO/d' android/app/src/main/AndroidManifest.xml
+          sed -i '/android.permission.READ_CONTACTS/d' android/app/src/main/AndroidManifest.xml
+
+          grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
+          grep -q 'version: 5.0.1+2' pubspec.yaml
+          grep -q 'DATABASE_VERSION = 4' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'com.mographiccode.chatvault.v31' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'importLegacyDatabase' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'pickAndShareFile' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'نسخ الرسالة' lib/main.dart
+          ! grep -q 'uses-permission' android/app/src/main/AndroidManifest.xml
+
+      - name: Get dependencies
+        working-directory: chatvault_next501/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_next501/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_next501/project
+        run: flutter test
+
+      - name: Build unsigned release APK
+        working-directory: chatvault_next501/project
+        run: flutter build apk --release
+
+      - name: Verify unsigned APK structure and alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='chatvault_next501/project/build/app/outputs/flutter-apk/app-release.apk'
+          test -s "$APK"
+          ZA=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
+          "$ZA" -c -P 16 -v 4 "$APK" | tee chatvault_next501/zipalign-verify.txt
+          grep -q 'Verification successful' chatvault_next501/zipalign-verify.txt
+          unzip -t "$APK" >/tmp/apk-unzip-test.txt
+          cp "$APK" chatvault_next501/ChatVault-Next-v5.0.1-unsigned.apk
+          sha256sum chatvault_next501/ChatVault-Next-v5.0.1-unsigned.apk | tee chatvault_next501/ChatVault-Next-v5.0.1-unsigned.sha256
+
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Next-v5.0.1-PERMISSION-LIGHT-UNSIGNED
+          path: |
+            chatvault_next501/ChatVault-Next-v5.0.1-unsigned.apk
+            chatvault_next501/ChatVault-Next-v5.0.1-unsigned.sha256
+            chatvault_next501/zipalign-verify.txt
+          if-no-files-found: error
+          retention-days: 7
