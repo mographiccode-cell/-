@@ -1,0 +1,70 @@
+diff -ruN v31src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt v40src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+--- v31src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-08-30 15:13:44.000000000 +0000
++++ v40src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-08-31 11:44:21.579775149 +0000
+@@ -5,6 +5,7 @@
+ import android.content.Intent
+ import android.content.pm.PackageManager
+ import android.os.Build
++import android.net.Uri
+ import android.provider.Settings
+ import androidx.core.content.FileProvider
+ import io.flutter.embedding.android.FlutterActivity
+@@ -62,7 +63,37 @@
+                     val copied = runCatching { MediaCaptureManager(applicationContext).scanRecentMedia(500) }.getOrDefault(0)
+                     runOnUiThread { result.success(copied) }
+                 }.start()
+-                "getConversations" -> result.success(database.getConversations(call.argument<String>("query").orEmpty()))
++                "getConversations" -> result.success(database.getConversations(
++                    call.argument<String>("query").orEmpty(),
++                    call.argument<Boolean>("archivedOnly") ?: false,
++                ))
++                "searchMessages" -> result.success(database.searchMessages(
++                    call.argument<String>("query").orEmpty(),
++                    call.argument<String>("conversationKey"),
++                    call.argument<Int>("limit") ?: 300,
++                ))
++                "setConversationArchived" -> {
++                    database.setConversationArchived(
++                        call.argument<String>("conversationKey").orEmpty(),
++                        call.argument<Boolean>("archived") ?: true,
++                    )
++                    result.success(true)
++                }
++                "setConversationPinned" -> {
++                    database.setConversationPinned(
++                        call.argument<String>("conversationKey").orEmpty(),
++                        call.argument<Boolean>("pinned") ?: true,
++                    )
++                    result.success(true)
++                }
++                "deleteConversation" -> {
++                    database.deleteConversation(call.argument<String>("conversationKey").orEmpty())
++                    result.success(true)
++                }
++                "openUrl" -> {
++                    val raw = call.argument<String>("url").orEmpty().trim()
++                    result.success(openUrl(raw))
++                }
+                 "getConversationMessages" -> result.success(database.getConversationMessages(call.argument<String>("conversationKey").orEmpty()))
+                 "getConversationDetails" -> result.success(database.getConversationDetails(call.argument<String>("conversationKey").orEmpty()))
+                 "getDeletedMessages" -> result.success(database.getDeletedMessages())
+@@ -198,6 +229,19 @@
+         }
+     }
+ 
++    private fun openUrl(raw: String): Boolean {
++        if (raw.isBlank()) return false
++        val normalized = when {
++            raw.startsWith("http://", true) || raw.startsWith("https://", true) -> raw
++            raw.startsWith("www.", true) -> "https://$raw"
++            else -> return false
++        }
++        return runCatching {
++            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(normalized)))
++            true
++        }.getOrDefault(false)
++    }
++
+     private fun openMedia(path: String, mimeType: String): Boolean {
+         val file = File(path)
+         if (!file.exists()) return false
