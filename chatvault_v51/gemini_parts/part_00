@@ -1,0 +1,144 @@
+package com.mographiccode.chatvault
+
+import android.content.Context
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLConnection
+import java.nio.charset.StandardCharsets
+import java.security.KeyStore
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+
+class GeminiManager(private val context: Context) {
+    companion object {
+        private const val PREFS = "chatvault_gemini"
+        private const val PREF_KEYS = "keys"
+        private const val PREF_ACTIVE = "active_key_id"
+        private const val PREF_MODEL = "model"
+        private const val PREF_FALLBACK = "auto_fallback"
+        private const val KEYSTORE_ALIAS = "chatvault_gemini_keys_v1"
+        private const val DEFAULT_MODEL = "gemini-3.7-flash"
+        private const val MAX_MEDIA_FILES = 30
+        private const val MAX_SINGLE_FILE = 250L * 1024L * 1024L
+        private const val API_BASE = "https://generativelanguage.googleapis.com"
+    }
+
+    data class StoredKey(
+        val id: String,
+        val label: String,
+        val encrypted: String,
+        val iv: String,
+        val createdAt: Long,
+    )
+
+    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun settings(): Map<String, Any> {
+        val keys = loadKeys()
+        val active = prefs.getString(PREF_ACTIVE, null)
+        val items = keys.map { item ->
+            val plain = runCatching { decrypt(item) }.getOrDefault("")
+            mapOf<String, Any>(
+                "id" to item.id,
+                "label" to item.label,
+                "masked" to maskKey(plain),
+                "active" to (item.id == active),
+                "createdAt" to item.createdAt,
+            )
+        }
+        return mapOf(
+            "keys" to items,
+            "activeKeyId" to (active ?: ""),
+            "model" to prefs.getString(PREF_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL },
+            "autoFallback" to prefs.getBoolean(PREF_FALLBACK, true),
+            "models" to listOf("gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro"),
+        )
+    }
+
+    fun addKey(label: String, apiKey: String): Map<String, Any> {
+        val clean = apiKey.trim()
+        require(clean.length >= 20) { "مفتاح Gemini غير صالح أو قصير جدًا." }
+        val id = UUID.randomUUID().toString()
+        val encrypted = encrypt(clean)
+        val item = StoredKey(
+            id = id,
+            label = label.trim().ifBlank { "Gemini ${loadKeys().size + 1}" },
+            encrypted = encrypted.first,
+            iv = encrypted.second,
+            createdAt = System.currentTimeMillis(),
+        )
+        val keys = loadKeys().toMutableList().apply { add(item) }
+        saveKeys(keys)
+        if (prefs.getString(PREF_ACTIVE, null).isNullOrBlank()) {
+            prefs.edit().putString(PREF_ACTIVE, id).apply()
+        }
+        return settings()
+    }
+
+    fun deleteKey(id: String): Map<String, Any> {
+        val remaining = loadKeys().filterNot { it.id == id }
+        saveKeys(remaining)
+        val active = prefs.getString(PREF_ACTIVE, null)
+        if (active == id) prefs.edit().putString(PREF_ACTIVE, remaining.firstOrNull()?.id).apply()
+        return settings()
+    }
+
+    fun setActiveKey(id: String): Map<String, Any> {
+        require(loadKeys().any { it.id == id }) { "المفتاح المحدد غير موجود." }
+        prefs.edit().putString(PREF_ACTIVE, id).apply()
+        return settings()
+    }
+
+    fun setModel(model: String): Map<String, Any> {
+        val allowed = setOf("gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro")
+        require(model in allowed) { "الموديل غير مدعوم في هذا الإصدار." }
+        prefs.edit().putString(PREF_MODEL, model).apply()
+        return settings()
+    }
+
+    fun setAutoFallback(enabled: Boolean): Map<String, Any> {
+        prefs.edit().putBoolean(PREF_FALLBACK, enabled).apply()
+        return settings()
+    }
+
+    fun testKey(id: String?): Map<String, Any> {
+        val entry = keyOrder(id).firstOrNull() ?: error("أضف Gemini API Key أولًا.")
+        val model = prefs.getString(PREF_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
+        val body = JSONObject()
+            .put("model", model)
+            .put("store", false)
+            .put("input", "Respond with exactly: OK")
+        val started = System.currentTimeMillis()
+        val response = requestJson(
+            method = "POST",
+            url = "$API_BASE/v1beta/interactions",
+            apiKey = entry.second,
+            body = body.toString(),
+        )
+        if (response.code !in 200..299) throw GeminiHttpException(response.code, extractError(response.body))
+        return mapOf(
+            "success" to true,
+            "keyId" to entry.first.id,
+            "label" to entry.first.label,
+            "model" to model,
+            "latencyMs" to (System.currentTimeMillis() - started),
+        )
+    }
+
+    fun analyzeConversation(
+        database: LocalMessageDatabase,
+        conversationKey: String,
+        prompt: String,
