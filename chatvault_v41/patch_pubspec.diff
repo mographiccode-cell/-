@@ -1,0 +1,11 @@
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -1,7 +1,7 @@
+ name: chatvault
+ description: Local WhatsApp notification conversation archive and analysis app.
+ publish_to: "none"
+-version: 4.0.0+10
++version: 4.1.0+11
+ 
+ environment:
+   sdk: ">=3.8.0 <4.0.0"
