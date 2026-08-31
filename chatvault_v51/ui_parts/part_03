@@ -1,0 +1,99 @@
+-          icon: Icons.photo_library_outlined,
+-          title: 'الصور والفيديو والصوت',
+-          subtitle: widget.mediaAccess ? 'مفعّل — يمكن محاولة أرشفة وسائط واتساب الظاهرة لـAndroid.' : 'امنح الصلاحية لحفظ الوسائط التي يستطيع Android الوصول إليها.',
+-          status: widget.mediaAccess,
+-          action: widget.mediaAccess ? 'مفعّل' : 'منح الصلاحية',
+-          onTap: widget.mediaAccess || _working ? null : _requestMedia,
++          icon: Icons.auto_awesome_rounded,
++          title: 'Gemini AI',
++          subtitle: 'أضف مفاتيح Gemini API، اختر الموديل، ثم حلل أي محادثة أو قروب بالنص والصور والصوت والفيديو والملفات.',
++          status: false,
++          action: 'إدارة Gemini',
++          onTap: _working ? null : _openGeminiSettings,
+         ),
+         const SizedBox(height: 9),
+-        _SettingCard(
+-          icon: Icons.contacts_outlined,
+-          title: 'جهات الاتصال والأرقام',
+-          subtitle: widget.contactsAccess ? 'مفعّل — تتم مطابقة أسماء واتساب بالأرقام المحفوظة محليًا عند توفرها.' : 'اختياري — فعّله لعرض رقم جهة الاتصال عندما يكون الاسم محفوظًا في الهاتف.',
+-          status: widget.contactsAccess,
+-          action: widget.contactsAccess ? 'تحديث المطابقة' : 'منح الصلاحية',
+-          onTap: _working ? null : () async {
+-            if (widget.contactsAccess) {
+-              setState(() => _working = true);
+-              try { await NativeBridge.refreshContacts(); await widget.onChanged(); } finally { if (mounted) setState(() => _working = false); }
+-            } else {
+-              await _requestContacts();
+-            }
+-          },
++        Container(
++          padding: const EdgeInsets.all(14),
++          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18)),
++          child: const Column(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              Row(children: [Icon(Icons.security_rounded, color: _accent), SizedBox(width: 9), Text('وضع الصلاحيات الخفيف', style: TextStyle(fontWeight: FontWeight.w800))]),
++              SizedBox(height: 7),
++              Text('لا يطلب هذا الإصدار صلاحيات الصور أو الفيديو أو الصوت أو جهات الاتصال. إرسال الملفات والاستيراد اليدوي يستخدمان منتقي ملفات Android الآمن.', style: TextStyle(color: _muted, height: 1.5, fontSize: 11.5)),
++            ],
++          ),
+         ),
+         const SizedBox(height: 9),
++        const SizedBox(height: 9),
+         _SettingCard(
+           icon: Icons.move_to_inbox_rounded,
+           title: 'استيراد بيانات ChatVault القديمة',
+@@ -2287,7 +2547,7 @@
+             children: [
+               Row(children: [Icon(Icons.shield_outlined, color: _accent), SizedBox(width: 9), Text('الخصوصية', style: TextStyle(fontWeight: FontWeight.w800))]),
+               SizedBox(height: 9),
+-              Text('لا يطلب ChatVault صلاحية الإنترنت. الرسائل والوسائط المؤرشفة تبقى داخل الجهاز. التطبيق لا يدخل قاعدة بيانات واتساب ولا يكسر التشفير.', style: TextStyle(color: _muted, height: 1.55, fontSize: 12)),
++              Text('تبقى بيانات ChatVault على الجهاز افتراضيًا. عند استخدام Gemini فقط، يتم إرسال المحادثة التي اخترتها ومرفقاتها إلى Google لتنفيذ طلب التحليل، ولا يتم إرسال شيء إلى Gemini في الخلفية.', style: TextStyle(color: _muted, height: 1.55, fontSize: 12)),
+             ],
+           ),
+         ),
+@@ -2311,11 +2571,213 @@
+           label: const Text('حذف كل بيانات ChatVault المحلية', style: TextStyle(color: Color(0xFFFF6577))),
+         ),
+         const SizedBox(height: 14),
+-        const Center(child: Text('ChatVault Stable 4.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
++        const Center(child: Text('ChatVault Next 5.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
+       ],
+     );
+   }
+ }
++
++class _GeminiSettingsSheet extends StatefulWidget {
++  const _GeminiSettingsSheet();
++
++  @override
++  State<_GeminiSettingsSheet> createState() => _GeminiSettingsSheetState();
++}
++
++class _GeminiSettingsSheetState extends State<_GeminiSettingsSheet> {
++  Map<String, dynamic> _settings = const {};
++  bool _loading = true;
++  bool _working = false;
++
++  List<Map<String, dynamic>> get _keys => ((_settings['keys'] as List?) ?? const [])
++      .whereType<Map>()
++      .map((e) => Map<String, dynamic>.from(e))
++      .toList();
++
++  @override
++  void initState() {
++    super.initState();
++    _load();
++  }
++
++  Future<void> _load() async {
++    try {
++      final settings = await NativeBridge.geminiSettings();
++      if (mounted) setState(() { _settings = settings; _loading = false; });
++    } catch (_) {
++      if (mounted) setState(() => _loading = false);
++    }
++  }
++
++  Future<void> _addKey() async {
++    final label = TextEditingController();
