@@ -1,0 +1,160 @@
+diff -ruN v31src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt v40src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+--- v31src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-08-30 15:12:18.000000000 +0000
++++ v40src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-08-31 11:46:53.841339292 +0000
+@@ -16,7 +16,7 @@
+ ) {
+     companion object {
+         private const val DATABASE_NAME = "chatvault.db"
+-        private const val DATABASE_VERSION = 2
++        private const val DATABASE_VERSION = 3
+         private const val TABLE_CONVERSATIONS = "conversations"
+         private const val TABLE_MESSAGES = "messages"
+         private const val TABLE_MEDIA = "media_archive"
+@@ -38,7 +38,9 @@
+                 last_sender TEXT,
+                 last_message TEXT,
+                 last_message_at INTEGER NOT NULL DEFAULT 0,
+-                message_count INTEGER NOT NULL DEFAULT 0
++                message_count INTEGER NOT NULL DEFAULT 0,
++                is_archived INTEGER NOT NULL DEFAULT 0,
++                is_pinned INTEGER NOT NULL DEFAULT 0
+             )
+             """.trimIndent()
+         )
+@@ -99,10 +101,14 @@
+             addColumnIfMissing(db, TABLE_MESSAGES, "sender_uri", "TEXT")
+             addColumnIfMissing(db, TABLE_MESSAGES, "sender_key", "TEXT")
+             addColumnIfMissing(db, TABLE_MESSAGES, "is_system_summary", "INTEGER NOT NULL DEFAULT 0")
+-            createIndexes(db)
+             flagLegacySummaryMessages(db)
+             rebuildConversationAggregates(db)
+         }
++        if (oldVersion < 3) {
++            addColumnIfMissing(db, TABLE_CONVERSATIONS, "is_archived", "INTEGER NOT NULL DEFAULT 0")
++            addColumnIfMissing(db, TABLE_CONVERSATIONS, "is_pinned", "INTEGER NOT NULL DEFAULT 0")
++            createIndexes(db)
++        }
+     }
+ 
+     override fun onOpen(db: SQLiteDatabase) {
+@@ -117,6 +123,8 @@
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_last ON $TABLE_CONVERSATIONS(last_message_at DESC)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_phone ON $TABLE_CONVERSATIONS(contact_phone)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_shortcut ON $TABLE_CONVERSATIONS(shortcut_id)")
++        db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_archive ON $TABLE_CONVERSATIONS(is_archived, last_message_at DESC)")
++        db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_pin ON $TABLE_CONVERSATIONS(is_pinned DESC, last_message_at DESC)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_conversation ON $TABLE_MESSAGES(conversation_key, posted_at ASC)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_deleted ON $TABLE_MESSAGES(is_deleted, is_deletion_signal)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_media ON $TABLE_MESSAGES(media_path)")
+@@ -477,11 +485,12 @@
+         return changed
+     }
+ 
+-    fun getConversations(query: String): List<Map<String, Any?>> {
++    fun getConversations(query: String, archivedOnly: Boolean = false): List<Map<String, Any?>> {
+         val trimmed = query.trim()
+         val args = mutableListOf<String>()
+         val where = buildString {
+             append(" WHERE c.message_count > 0 ")
++            append(if (archivedOnly) " AND c.is_archived = 1 " else " AND c.is_archived = 0 ")
+             if (trimmed.isNotBlank()) {
+                 append(" AND (COALESCE(c.contact_name, c.title) LIKE ? OR c.contact_phone LIKE ? OR c.last_message LIKE ? OR EXISTS (SELECT 1 FROM $TABLE_MESSAGES sm WHERE sm.conversation_key = c.conversation_key AND sm.is_system_summary = 0 AND (sm.body LIKE ? OR sm.sender LIKE ? OR sm.sender_phone LIKE ?)))")
+                 repeat(6) { args += "%$trimmed%" }
+@@ -493,10 +502,11 @@
+                    c.title, c.is_group, c.last_message, c.last_message_at, c.message_count,
+                    (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key = c.conversation_key AND m.is_deleted = 1 AND m.is_system_summary = 0) AS deleted_count,
+                    (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key = c.conversation_key AND m.media_path IS NOT NULL AND m.is_system_summary = 0) AS media_count,
+-                   c.contact_name, c.contact_phone, c.contact_uri, c.shortcut_id, c.locus_id, c.last_sender
++                   c.contact_name, c.contact_phone, c.contact_uri, c.shortcut_id, c.locus_id, c.last_sender,
++                   c.is_archived, c.is_pinned
+               FROM $TABLE_CONVERSATIONS c
+               $where
+-             ORDER BY c.last_message_at DESC, display_title COLLATE NOCASE ASC
++             ORDER BY c.is_pinned DESC, c.last_message_at DESC, display_title COLLATE NOCASE ASC
+              LIMIT 500
+         """.trimIndent()
+         return readableDatabase.rawQuery(sql, args.toTypedArray()).use { cursor ->
+@@ -504,6 +514,74 @@
+         }
+     }
+ 
++    fun searchMessages(query: String, conversationKey: String? = null, limit: Int = 300): List<Map<String, Any?>> {
++        val trimmed = query.trim()
++        if (trimmed.isBlank()) return emptyList()
++        val like = "%$trimmed%"
++        val keyClause = if (conversationKey.isNullOrBlank()) "" else " AND m.conversation_key = ? "
++        val args = mutableListOf(like, like, like)
++        if (!conversationKey.isNullOrBlank()) args += conversationKey
++        val sql = """
++            SELECT m.id, m.conversation_key, m.package_name, m.sender, m.sender_phone, m.sender_uri, m.sender_key,
++                   m.body, m.posted_at, m.direction, m.message_type, m.media_path, m.mime_type, m.is_deleted,
++                   m.is_deletion_signal, m.is_system_summary, m.source,
++                   COALESCE(NULLIF(c.contact_name,''), c.title), c.is_group
++              FROM $TABLE_MESSAGES m
++              JOIN $TABLE_CONVERSATIONS c ON c.conversation_key = m.conversation_key
++             WHERE m.is_deletion_signal = 0 AND m.is_system_summary = 0
++               AND (m.body LIKE ? OR m.sender LIKE ? OR m.sender_phone LIKE ?)
++               $keyClause
++             ORDER BY m.posted_at DESC, m.id DESC
++             LIMIT ${limit.coerceIn(1, 1000)}
++        """.trimIndent()
++        return readableDatabase.rawQuery(sql, args.toTypedArray()).use { cursor ->
++            buildList {
++                while (cursor.moveToNext()) {
++                    val base = messageToMapV2(cursor).toMutableMap()
++                    base["conversationTitle"] = cursor.getString(17)
++                    base["isGroup"] = cursor.getInt(18) == 1
++                    add(base)
++                }
++            }
++        }
++    }
++
++    fun setConversationArchived(conversationKey: String, archived: Boolean) {
++        writableDatabase.execSQL(
++            "UPDATE $TABLE_CONVERSATIONS SET is_archived = ? WHERE conversation_key = ?",
++            arrayOf<Any?>(if (archived) 1 else 0, conversationKey),
++        )
++        NativeEventBus.dataChanged(conversationKey, if (archived) "archive" else "unarchive")
++    }
++
++    fun setConversationPinned(conversationKey: String, pinned: Boolean) {
++        writableDatabase.execSQL(
++            "UPDATE $TABLE_CONVERSATIONS SET is_pinned = ? WHERE conversation_key = ?",
++            arrayOf<Any?>(if (pinned) 1 else 0, conversationKey),
++        )
++        NativeEventBus.dataChanged(conversationKey, if (pinned) "pin" else "unpin")
++    }
++
++    fun deleteConversation(conversationKey: String) {
++        val db = writableDatabase
++        val files = mutableSetOf<String>()
++        db.beginTransaction()
++        try {
++            db.rawQuery("SELECT media_path FROM $TABLE_MESSAGES WHERE conversation_key = ? AND media_path IS NOT NULL", arrayOf(conversationKey)).use { c ->
++                while (c.moveToNext()) c.getString(0)?.let(files::add)
++            }
++            db.rawQuery("SELECT a.local_path FROM $TABLE_MEDIA a JOIN $TABLE_MESSAGES m ON m.id = a.message_id WHERE m.conversation_key = ?", arrayOf(conversationKey)).use { c ->
++                while (c.moveToNext()) c.getString(0)?.let(files::add)
++            }
++            db.execSQL("DELETE FROM $TABLE_MEDIA WHERE message_id IN (SELECT id FROM $TABLE_MESSAGES WHERE conversation_key = ?)", arrayOf<Any?>(conversationKey))
++            db.delete(TABLE_MESSAGES, "conversation_key = ?", arrayOf(conversationKey))
++            db.delete(TABLE_CONVERSATIONS, "conversation_key = ?", arrayOf(conversationKey))
++            db.setTransactionSuccessful()
++        } finally { db.endTransaction() }
++        files.forEach { runCatching { java.io.File(it).delete() } }
++        NativeEventBus.dataChanged(conversationKey, "delete_conversation")
++    }
++
+     fun getConversationMessages(conversationKey: String): List<Map<String, Any?>> =
+         readableDatabase.rawQuery(
+             """
+@@ -764,6 +842,8 @@
+         "shortcutId" to cursor.getString(13),
+         "locusId" to cursor.getString(14),
+         "lastSender" to cursor.getString(15),
++        "isArchived" to (cursor.getInt(16) == 1),
++        "isPinned" to (cursor.getInt(17) == 1),
+     )
+ 
+     private fun messageToMapV2(cursor: Cursor): Map<String, Any?> = mapOf(
