@@ -44,6 +44,7 @@ jobs:
           patch -p1 < ../../chatvault_v40/patch_activity.diff
           patch -p1 < ../../chatvault_v40/patch_ui.diff
           patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+          sed -i 's/if (!mounted || matches.isEmpty) return;/if (!context.mounted || matches.isEmpty) return;/' lib/main.dart
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
           sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.stable"/' android/app/build.gradle.kts
           sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
@@ -53,6 +54,7 @@ jobs:
           grep -q 'searchMessages' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
           grep -q 'setConversationArchived' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q '_LinkifiedHighlightedText' lib/main.dart
+          grep -q 'context.mounted' lib/main.dart
           grep -q 'version: 4.0.0+10' pubspec.yaml
 
       - name: Get dependencies
