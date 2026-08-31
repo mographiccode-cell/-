@@ -1,0 +1,100 @@
+                .put("store", false)
+                .put("system_instruction", system)
+                .put("input", input)
+
+            val started = System.currentTimeMillis()
+            val response = requestJson(
+                method = "POST",
+                url = "$API_BASE/v1beta/interactions",
+                apiKey = apiKey,
+                body = body.toString(),
+                readTimeoutMs = 180_000,
+            )
+            if (response.code !in 200..299) throw GeminiHttpException(response.code, extractError(response.body))
+            val json = JSONObject(response.body)
+            val report = extractInteractionText(json).trim()
+            if (report.isBlank()) error("استجاب Gemini بدون نص تقرير.")
+            val usage = json.optJSONObject("usage")
+            return mapOf(
+                "success" to true,
+                "report" to report,
+                "model" to json.optString("model", model),
+                "interactionId" to json.optString("id", ""),
+                "latencyMs" to (System.currentTimeMillis() - started),
+                "inputTokens" to (usage?.optLong("total_input_tokens", 0L) ?: 0L),
+                "outputTokens" to (usage?.optLong("total_output_tokens", 0L) ?: 0L),
+            )
+        } finally {
+            uploaded.forEach { runCatching { deleteRemoteFile(apiKey, it.name) } }
+        }
+    }
+
+    private fun buildTranscript(details: Map<String, Any?>, messages: List<Map<String, Any?>>): String {
+        val formatter = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).apply { timeZone = TimeZone.getDefault() }
+        return buildString {
+            messages.forEach { row ->
+                val ts = (row["postedAt"] as? Number)?.toLong() ?: 0L
+                val direction = row["direction"]?.toString().orEmpty()
+                val sender = if (direction == "outgoing") "أنا" else row["sender"]?.toString().orEmpty().ifBlank { details["displayTitle"]?.toString().orEmpty() }
+                val phone = row["senderPhone"]?.toString()?.takeIf { it.isNotBlank() }
+                val text = row["text"]?.toString().orEmpty()
+                val deleted = row["isDeleted"] == true
+                val type = row["messageType"]?.toString().orEmpty().ifBlank { "text" }
+                append('[').append(formatter.format(Date(ts))).append("] ")
+                append(sender)
+                if (phone != null) append(" ($phone)")
+                if (deleted) append(" [محذوفة بعد الاستلام]")
+                append(" <$type>: ")
+                appendLine(text.ifBlank { "[بدون نص]" })
+            }
+        }
+    }
+
+    private data class RemoteFile(val name: String, val uri: String, val mimeType: String)
+
+    private fun uploadFile(apiKey: String, file: File, mimeHint: String?): RemoteFile {
+        val mime = mimeHint?.takeIf { it.isNotBlank() }
+            ?: URLConnection.guessContentTypeFromName(file.name)
+            ?: "application/octet-stream"
+        val startUrl = URL("$API_BASE/upload/v1beta/files")
+        val start = startUrl.openConnection() as HttpURLConnection
+        start.requestMethod = "POST"
+        start.connectTimeout = 30_000
+        start.readTimeout = 60_000
+        start.doOutput = true
+        start.setRequestProperty("x-goog-api-key", apiKey)
+        start.setRequestProperty("Content-Type", "application/json")
+        start.setRequestProperty("X-Goog-Upload-Protocol", "resumable")
+        start.setRequestProperty("X-Goog-Upload-Command", "start")
+        start.setRequestProperty("X-Goog-Upload-Header-Content-Length", file.length().toString())
+        start.setRequestProperty("X-Goog-Upload-Header-Content-Type", mime)
+        val metadata = JSONObject().put("file", JSONObject().put("display_name", file.name)).toString()
+        start.outputStream.use { it.write(metadata.toByteArray(StandardCharsets.UTF_8)) }
+        val startCode = start.responseCode
+        if (startCode !in 200..299) {
+            val body = readBody(start)
+            start.disconnect()
+            throw GeminiHttpException(startCode, extractError(body))
+        }
+        val uploadUrl = start.headerFields.entries.firstOrNull { it.key?.equals("X-Goog-Upload-URL", ignoreCase = true) == true }
+            ?.value?.firstOrNull()?.trim()
+            ?: start.getHeaderField("X-Goog-Upload-URL")
+        start.disconnect()
+        require(!uploadUrl.isNullOrBlank()) { "Gemini لم يرجع رابط رفع الملف." }
+
+        val upload = URL(uploadUrl).openConnection() as HttpURLConnection
+        upload.requestMethod = "POST"
+        upload.connectTimeout = 30_000
+        upload.readTimeout = 180_000
+        upload.doOutput = true
+        upload.setRequestProperty("Content-Type", mime)
+        upload.setRequestProperty("Content-Length", file.length().toString())
+        upload.setRequestProperty("X-Goog-Upload-Offset", "0")
+        upload.setRequestProperty("X-Goog-Upload-Command", "upload, finalize")
+        upload.setFixedLengthStreamingMode(file.length())
+        file.inputStream().use { input -> upload.outputStream.use { output -> input.copyTo(output, 256 * 1024) } }
+        val code = upload.responseCode
+        val body = readBody(upload)
+        upload.disconnect()
+        if (code !in 200..299) throw GeminiHttpException(code, extractError(body))
+        val fileJson = JSONObject(body).optJSONObject("file") ?: error("تعذر قراءة نتيجة رفع الملف إلى Gemini.")
