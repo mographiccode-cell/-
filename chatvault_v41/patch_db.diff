@@ -1,0 +1,321 @@
+--- a/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
++++ b/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+@@ -5,6 +5,8 @@
+ import android.database.Cursor
+ import android.database.sqlite.SQLiteDatabase
+ import android.database.sqlite.SQLiteOpenHelper
++import java.io.File
++import java.io.FileInputStream
+ import java.security.MessageDigest
+ import java.util.Calendar
+ 
+@@ -16,10 +18,11 @@
+ ) {
+     companion object {
+         private const val DATABASE_NAME = "chatvault.db"
+-        private const val DATABASE_VERSION = 3
++        private const val DATABASE_VERSION = 4
+         private const val TABLE_CONVERSATIONS = "conversations"
+         private const val TABLE_MESSAGES = "messages"
+         private const val TABLE_MEDIA = "media_archive"
++        private const val TABLE_IMPORT_HISTORY = "import_history"
+     }
+ 
+     override fun onCreate(db: SQLiteDatabase) {
+@@ -87,6 +90,7 @@
+             )
+             """.trimIndent()
+         )
++        createImportHistoryTable(db)
+         createIndexes(db)
+     }
+ 
+@@ -109,6 +113,10 @@
+             addColumnIfMissing(db, TABLE_CONVERSATIONS, "is_pinned", "INTEGER NOT NULL DEFAULT 0")
+             createIndexes(db)
+         }
++        if (oldVersion < 4) {
++            createImportHistoryTable(db)
++            createIndexes(db)
++        }
+     }
+ 
+     override fun onOpen(db: SQLiteDatabase) {
+@@ -119,6 +127,22 @@
+         }
+     }
+ 
++    private fun createImportHistoryTable(db: SQLiteDatabase) {
++        db.execSQL(
++            """
++            CREATE TABLE IF NOT EXISTS $TABLE_IMPORT_HISTORY (
++                id INTEGER PRIMARY KEY AUTOINCREMENT,
++                fingerprint TEXT NOT NULL UNIQUE,
++                source_label TEXT NOT NULL,
++                imported_at INTEGER NOT NULL,
++                conversation_count INTEGER NOT NULL DEFAULT 0,
++                message_count INTEGER NOT NULL DEFAULT 0,
++                media_count INTEGER NOT NULL DEFAULT 0
++            )
++            """.trimIndent()
++        )
++    }
++
+     private fun createIndexes(db: SQLiteDatabase) {
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_last ON $TABLE_CONVERSATIONS(last_message_at DESC)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_conversations_phone ON $TABLE_CONVERSATIONS(contact_phone)")
+@@ -752,6 +776,254 @@
+         )
+     }
+ 
++    fun importLegacyDatabase(
++        legacyFile: File,
++        sourceLabel: String = "legacy",
++        oldMediaRoot: String? = null,
++        newMediaRoot: String? = null,
++    ): Map<String, Any> {
++        require(legacyFile.exists() && legacyFile.length() > 0) { "ملف قاعدة البيانات غير موجود أو فارغ" }
++        val fingerprint = fileSha256(legacyFile)
++        val db = writableDatabase
++        createImportHistoryTable(db)
++        val alreadyImported = db.rawQuery(
++            "SELECT 1 FROM $TABLE_IMPORT_HISTORY WHERE fingerprint = ? LIMIT 1",
++            arrayOf(fingerprint),
++        ).use { it.moveToFirst() }
++        if (alreadyImported) {
++            return mapOf(
++                "success" to true,
++                "alreadyImported" to true,
++                "conversations" to 0,
++                "messages" to 0,
++                "media" to 0,
++                "source" to sourceLabel,
++            )
++        }
++
++        val legacy = SQLiteDatabase.openDatabase(legacyFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
++        var conversationCount = 0
++        var messageCount = 0
++        var mediaCount = 0
++        val messageIdMap = mutableMapOf<Long, Long>()
++        val pendingMatches = mutableListOf<Pair<Long, Long>>()
++
++        db.beginTransaction()
++        try {
++            if (legacyTableExists(legacy, TABLE_CONVERSATIONS)) {
++                legacy.rawQuery("SELECT * FROM $TABLE_CONVERSATIONS", null).use { cursor ->
++                    while (cursor.moveToNext()) {
++                        val key = cursor.stringValue("conversation_key")?.trim().orEmpty()
++                        if (key.isBlank()) continue
++                        val values = ContentValues().apply {
++                            put("conversation_key", key)
++                            put("package_name", cursor.stringValue("package_name") ?: "com.whatsapp")
++                            put("title", cursor.stringValue("title")?.ifBlank { "محادثة واتساب" } ?: "محادثة واتساب")
++                            put("is_group", cursor.intValue("is_group"))
++                            put("shortcut_id", cursor.stringValue("shortcut_id"))
++                            put("locus_id", cursor.stringValue("locus_id"))
++                            put("contact_name", cursor.stringValue("contact_name"))
++                            put("contact_phone", cursor.stringValue("contact_phone"))
++                            put("contact_uri", cursor.stringValue("contact_uri"))
++                            put("last_sender", cursor.stringValue("last_sender"))
++                            put("last_message", cursor.stringValue("last_message") ?: "")
++                            put("last_message_at", cursor.longValue("last_message_at"))
++                            put("message_count", 0)
++                            put("is_archived", cursor.intValue("is_archived"))
++                            put("is_pinned", cursor.intValue("is_pinned"))
++                        }
++                        val inserted = db.insertWithOnConflict(TABLE_CONVERSATIONS, null, values, SQLiteDatabase.CONFLICT_IGNORE)
++                        if (inserted != -1L) conversationCount++
++                        db.execSQL(
++                            """
++                            UPDATE $TABLE_CONVERSATIONS
++                               SET contact_name = COALESCE(NULLIF(contact_name,''), NULLIF(?,'')),
++                                   contact_phone = COALESCE(NULLIF(contact_phone,''), NULLIF(?,'')),
++                                   contact_uri = COALESCE(NULLIF(contact_uri,''), NULLIF(?,'')),
++                                   shortcut_id = COALESCE(NULLIF(shortcut_id,''), NULLIF(?,'')),
++                                   locus_id = COALESCE(NULLIF(locus_id,''), NULLIF(?,'')),
++                                   is_archived = MAX(is_archived, ?),
++                                   is_pinned = MAX(is_pinned, ?)
++                             WHERE conversation_key = ?
++                            """.trimIndent(),
++                            arrayOf<Any?>(
++                                cursor.stringValue("contact_name"), cursor.stringValue("contact_phone"),
++                                cursor.stringValue("contact_uri"), cursor.stringValue("shortcut_id"),
++                                cursor.stringValue("locus_id"), cursor.intValue("is_archived"),
++                                cursor.intValue("is_pinned"), key,
++                            ),
++                        )
++                    }
++                }
++            }
++
++            if (legacyTableExists(legacy, TABLE_MESSAGES)) {
++                legacy.rawQuery("SELECT * FROM $TABLE_MESSAGES ORDER BY posted_at ASC, id ASC", null).use { cursor ->
++                    while (cursor.moveToNext()) {
++                        val oldId = cursor.longValue("id", -1L)
++                        val key = cursor.stringValue("conversation_key")?.trim().orEmpty()
++                        if (key.isBlank()) continue
++                        if (!conversationExists(db, key)) {
++                            val fallback = ContentValues().apply {
++                                put("conversation_key", key)
++                                put("package_name", cursor.stringValue("package_name") ?: "com.whatsapp")
++                                put("title", "محادثة مستوردة")
++                                put("is_group", 0)
++                                put("message_count", 0)
++                                put("last_message", "")
++                                put("last_message_at", 0L)
++                                put("is_archived", 0)
++                                put("is_pinned", 0)
++                            }
++                            if (db.insertWithOnConflict(TABLE_CONVERSATIONS, null, fallback, SQLiteDatabase.CONFLICT_IGNORE) != -1L) {
++                                conversationCount++
++                            }
++                        }
++                        val body = cursor.stringValue("body")?.trim().orEmpty().ifBlank { typeLabel(cursor.stringValue("message_type") ?: "text") }
++                        val postedAt = cursor.longValue("posted_at", System.currentTimeMillis())
++                        val packageName = cursor.stringValue("package_name") ?: "com.whatsapp"
++                        val direction = cursor.stringValue("direction") ?: "incoming"
++                        val messageType = cursor.stringValue("message_type") ?: "text"
++                        val sender = cursor.stringValue("sender")
++                        val oldMediaPath = cursor.stringValue("media_path")
++                        val rewrittenMediaPath = rewriteLegacyPath(oldMediaPath, oldMediaRoot, newMediaRoot)
++                        val dedupe = cursor.stringValue("dedupe_hash")?.takeIf { it.isNotBlank() } ?: sha256(
++                            listOf(packageName, key, cursor.stringValue("sender_key").orEmpty(), sender.orEmpty(), body, postedAt.toString(), direction, messageType, rewrittenMediaPath.orEmpty()).joinToString("|")
++                        )
++                        val values = ContentValues().apply {
++                            put("conversation_key", key)
++                            put("package_name", packageName)
++                            put("sender", sender)
++                            put("sender_phone", cursor.stringValue("sender_phone"))
++                            put("sender_uri", cursor.stringValue("sender_uri"))
++                            put("sender_key", cursor.stringValue("sender_key"))
++                            put("body", body)
++                            put("posted_at", postedAt)
++                            put("captured_at", cursor.longValue("captured_at", postedAt))
++                            put("direction", direction)
++                            put("message_type", messageType)
++                            put("media_path", rewrittenMediaPath)
++                            put("mime_type", cursor.stringValue("mime_type"))
++                            put("notification_key", cursor.stringValue("notification_key"))
++                            put("dedupe_hash", dedupe)
++                            put("is_deletion_signal", cursor.intValue("is_deletion_signal"))
++                            put("is_deleted", cursor.intValue("is_deleted"))
++                            put("is_system_summary", cursor.intValue("is_system_summary"))
++                            put("source", "legacy_import/${cursor.stringValue("source") ?: "notification"}")
++                        }
++                        var newId = db.insertWithOnConflict(TABLE_MESSAGES, null, values, SQLiteDatabase.CONFLICT_IGNORE)
++                        if (newId == -1L) {
++                            newId = db.rawQuery("SELECT id FROM $TABLE_MESSAGES WHERE dedupe_hash = ? LIMIT 1", arrayOf(dedupe)).use {
++                                if (it.moveToFirst()) it.getLong(0) else -1L
++                            }
++                        } else {
++                            messageCount++
++                        }
++                        if (oldId >= 0 && newId >= 0) messageIdMap[oldId] = newId
++                        val oldMatched = cursor.longValue("matched_original_id", -1L)
++                        if (newId >= 0 && oldMatched >= 0) pendingMatches += newId to oldMatched
++                    }
++                }
++            }
++
++            pendingMatches.forEach { (newId, oldMatched) ->
++                messageIdMap[oldMatched]?.let { mapped ->
++                    db.execSQL("UPDATE $TABLE_MESSAGES SET matched_original_id = ? WHERE id = ?", arrayOf<Any?>(mapped, newId))
++                }
++            }
++
++            if (legacyTableExists(legacy, TABLE_MEDIA)) {
++                legacy.rawQuery("SELECT * FROM $TABLE_MEDIA ORDER BY captured_at ASC, id ASC", null).use { cursor ->
++                    while (cursor.moveToNext()) {
++                        val packageName = cursor.stringValue("package_name") ?: "com.whatsapp"
++                        val oldPath = cursor.stringValue("local_path") ?: continue
++                        val newPath = rewriteLegacyPath(oldPath, oldMediaRoot, newMediaRoot) ?: oldPath
++                        val oldMessageId = cursor.longValue("message_id", -1L)
++                        val mappedMessageId = messageIdMap[oldMessageId]
++                        val capturedAt = cursor.longValue("captured_at", System.currentTimeMillis())
++                        val dedupe = cursor.stringValue("dedupe_hash")?.takeIf { it.isNotBlank() } ?: sha256("$packageName|$newPath|$capturedAt")
++                        val values = ContentValues().apply {
++                            put("package_name", packageName)
++                            put("file_name", cursor.stringValue("file_name") ?: File(newPath).name.ifBlank { "media" })
++                            put("mime_type", cursor.stringValue("mime_type"))
++                            put("original_uri", cursor.stringValue("original_uri"))
++                            put("local_path", newPath)
++                            put("captured_at", capturedAt)
++                            put("source_created_at", cursor.longValue("source_created_at"))
++                            if (mappedMessageId != null) put("message_id", mappedMessageId) else putNull("message_id")
++                            put("dedupe_hash", dedupe)
++                        }
++                        if (db.insertWithOnConflict(TABLE_MEDIA, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L) mediaCount++
++                    }
++                }
++            }
++
++            flagLegacySummaryMessages(db)
++            rebuildConversationAggregates(db)
++            val history = ContentValues().apply {
++                put("fingerprint", fingerprint)
++                put("source_label", sourceLabel)
++                put("imported_at", System.currentTimeMillis())
++                put("conversation_count", conversationCount)
++                put("message_count", messageCount)
++                put("media_count", mediaCount)
++            }
++            db.insertWithOnConflict(TABLE_IMPORT_HISTORY, null, history, SQLiteDatabase.CONFLICT_IGNORE)
++            db.setTransactionSuccessful()
++        } finally {
++            db.endTransaction()
++            legacy.close()
++        }
++        NativeEventBus.dataChanged(null, "legacy_import")
++        return mapOf(
++            "success" to true,
++            "alreadyImported" to false,
++            "conversations" to conversationCount,
++            "messages" to messageCount,
++            "media" to mediaCount,
++            "source" to sourceLabel,
++        )
++    }
++
++    private fun legacyTableExists(db: SQLiteDatabase, table: String): Boolean =
++        db.rawQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", arrayOf(table)).use { it.moveToFirst() }
++
++    private fun conversationExists(db: SQLiteDatabase, key: String): Boolean =
++        db.rawQuery("SELECT 1 FROM $TABLE_CONVERSATIONS WHERE conversation_key=? LIMIT 1", arrayOf(key)).use { it.moveToFirst() }
++
++    private fun rewriteLegacyPath(path: String?, oldRoot: String?, newRoot: String?): String? {
++        if (path.isNullOrBlank() || oldRoot.isNullOrBlank() || newRoot.isNullOrBlank()) return path
++        return if (path.startsWith(oldRoot)) newRoot + path.removePrefix(oldRoot) else path
++    }
++
++    private fun fileSha256(file: File): String {
++        val digest = MessageDigest.getInstance("SHA-256")
++        FileInputStream(file).use { input ->
++            val buffer = ByteArray(64 * 1024)
++            while (true) {
++                val count = input.read(buffer)
++                if (count <= 0) break
++                digest.update(buffer, 0, count)
++            }
++        }
++        return digest.digest().joinToString("") { "%02x".format(it) }
++    }
++
++    private fun Cursor.stringValue(column: String): String? {
++        val index = getColumnIndex(column)
++        return if (index < 0 || isNull(index)) null else getString(index)
++    }
++
++    private fun Cursor.longValue(column: String, default: Long = 0L): Long {
++        val index = getColumnIndex(column)
++        return if (index < 0 || isNull(index)) default else getLong(index)
++    }
++
++    private fun Cursor.intValue(column: String, default: Int = 0): Int {
++        val index = getColumnIndex(column)
++        return if (index < 0 || isNull(index)) default else getInt(index)
++    }
++
+     fun clearAll() {
+         writableDatabase.beginTransaction()
+         try {
