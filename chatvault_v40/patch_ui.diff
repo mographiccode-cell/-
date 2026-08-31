@@ -1,0 +1,460 @@
+diff -ruN v31src/lib/main.dart v40src/lib/main.dart
+--- v31src/lib/main.dart	2026-08-30 15:16:21.000000000 +0000
++++ v40src/lib/main.dart	2026-08-31 11:47:43.486553182 +0000
+@@ -2,6 +2,7 @@
+ import 'dart:io';
+ 
+ import 'package:flutter/material.dart';
++import 'package:flutter/gestures.dart';
+ import 'package:flutter/services.dart';
+ 
+ void main() {
+@@ -115,10 +116,10 @@
+   static Future<int> syncMedia() async =>
+       await _channel.invokeMethod<int>('syncMedia') ?? 0;
+ 
+-  static Future<List<Conversation>> getConversations({String query = ''}) async {
++  static Future<List<Conversation>> getConversations({String query = '', bool archivedOnly = false}) async {
+     final raw = await _channel.invokeMethod<List<dynamic>>(
+           'getConversations',
+-          <String, dynamic>{'query': query},
++          <String, dynamic>{'query': query, 'archivedOnly': archivedOnly},
+         ) ??
+         <dynamic>[];
+     return raw
+@@ -135,6 +136,27 @@
+     return ConversationDetails.fromMap(Map<String, dynamic>.from(raw));
+   }
+ 
++  static Future<List<ChatMessage>> searchMessages(String query, {String? conversationKey, int limit = 300}) async {
++    final raw = await _channel.invokeMethod<List<dynamic>>('searchMessages', <String, dynamic>{
++          'query': query,
++          'conversationKey': conversationKey,
++          'limit': limit,
++        }) ?? <dynamic>[];
++    return raw.map((item) => ChatMessage.fromMap(Map<String, dynamic>.from(item as Map))).toList();
++  }
++
++  static Future<void> setConversationArchived(String key, bool archived) async =>
++      _channel.invokeMethod<void>('setConversationArchived', <String, dynamic>{'conversationKey': key, 'archived': archived});
++
++  static Future<void> setConversationPinned(String key, bool pinned) async =>
++      _channel.invokeMethod<void>('setConversationPinned', <String, dynamic>{'conversationKey': key, 'pinned': pinned});
++
++  static Future<void> deleteConversation(String key) async =>
++      _channel.invokeMethod<void>('deleteConversation', <String, dynamic>{'conversationKey': key});
++
++  static Future<bool> openUrl(String url) async =>
++      await _channel.invokeMethod<bool>('openUrl', <String, dynamic>{'url': url}) ?? false;
++
+   static Future<List<ChatMessage>> getConversationMessages(String key) async {
+     final raw = await _channel.invokeMethod<List<dynamic>>(
+           'getConversationMessages',
+@@ -226,6 +248,8 @@
+     required this.contactPhone,
+     required this.contactUri,
+     required this.lastSender,
++    required this.isArchived,
++    required this.isPinned,
+   });
+ 
+   final String key;
+@@ -242,6 +266,8 @@
+   final String? contactPhone;
+   final String? contactUri;
+   final String? lastSender;
++  final bool isArchived;
++  final bool isPinned;
+ 
+   factory Conversation.fromMap(Map<String, dynamic> map) => Conversation(
+         key: map['conversationKey']?.toString() ?? '',
+@@ -258,6 +284,8 @@
+         contactPhone: _nullableText(map['contactPhone']),
+         contactUri: _nullableText(map['contactUri']),
+         lastSender: _nullableText(map['lastSender']),
++        isArchived: _bool(map['isArchived']),
++        isPinned: _bool(map['isPinned']),
+       );
+ }
+ 
+@@ -675,7 +703,9 @@
+   final _search = TextEditingController();
+   Timer? _debounce;
+   bool _loading = true;
++  bool _archivedOnly = false;
+   List<Conversation> _items = const [];
++  List<ChatMessage> _searchHits = const [];
+   String? _error;
+ 
+   @override
+@@ -697,10 +727,15 @@
+       _error = null;
+     });
+     try {
+-      final items = await NativeBridge.getConversations(query: _search.text.trim());
++      final query = _search.text.trim();
++      final values = await Future.wait<dynamic>([
++        NativeBridge.getConversations(query: query, archivedOnly: _archivedOnly),
++        if (query.isNotEmpty) NativeBridge.searchMessages(query, limit: 250) else Future.value(<ChatMessage>[]),
++      ]);
+       if (!mounted) return;
+       setState(() {
+-        _items = items;
++        _items = values[0] as List<Conversation>;
++        _searchHits = values[1] as List<ChatMessage>;
+         _loading = false;
+       });
+     } on PlatformException catch (e) {
+@@ -712,6 +747,29 @@
+     }
+   }
+ 
++  Future<void> _conversationAction(Conversation conversation, String action) async {
++    if (action == 'delete') {
++      final ok = await showDialog<bool>(
++        context: context,
++        builder: (context) => AlertDialog(
++          title: const Text('حذف المحادثة من ChatVault؟'),
++          content: Text('سيتم حذف نسخة ChatVault المحلية من محادثة «${conversation.title}» والوسائط المرتبطة بها فقط. لن يُحذف شيء من WhatsApp.'),
++          actions: [
++            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('إلغاء')),
++            FilledButton.tonal(onPressed: () => Navigator.pop(context, true), child: const Text('حذف')),
++          ],
++        ),
++      );
++      if (ok != true) return;
++      await NativeBridge.deleteConversation(conversation.key);
++    } else if (action == 'archive') {
++      await NativeBridge.setConversationArchived(conversation.key, !conversation.isArchived);
++    } else if (action == 'pin') {
++      await NativeBridge.setConversationPinned(conversation.key, !conversation.isPinned);
++    }
++    if (mounted) { await _load(); widget.onChanged(); }
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     return RefreshIndicator(
+@@ -731,6 +789,22 @@
+               isDense: true,
+             ),
+           ),
++          const SizedBox(height: 10),
++          Row(
++            children: [
++              ChoiceChip(
++                label: const Text('المحادثات'),
++                selected: !_archivedOnly,
++                onSelected: (_) { setState(() => _archivedOnly = false); _load(); },
++              ),
++              const SizedBox(width: 8),
++              ChoiceChip(
++                label: const Text('المؤرشفة'),
++                selected: _archivedOnly,
++                onSelected: (_) { setState(() => _archivedOnly = true); _load(); },
++              ),
++            ],
++          ),
+           const SizedBox(height: 12),
+           if (_loading)
+             const Padding(padding: EdgeInsets.all(40), child: Center(child: CircularProgressIndicator()))
+@@ -754,12 +828,29 @@
+                         ),
+                       ),
+                     );
+-                    if (mounted) {
+-                      await _load();
+-                      widget.onChanged();
+-                    }
++                    if (mounted) { await _load(); widget.onChanged(); }
+                   },
++                  onAction: (action) => _conversationAction(conversation, action),
+                 )),
++          if (_search.text.trim().isNotEmpty && _searchHits.isNotEmpty) ...[
++            const SizedBox(height: 16),
++            Text('نتائج الرسائل (${_searchHits.length})', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13)),
++            const SizedBox(height: 6),
++            ..._searchHits.map((hit) => _SearchResultTile(
++                  message: hit,
++                  query: _search.text.trim(),
++                  onTap: () async {
++                    final all = <Conversation>[
++                      ...await NativeBridge.getConversations(query: '', archivedOnly: false),
++                      ...await NativeBridge.getConversations(query: '', archivedOnly: true),
++                    ];
++                    final matches = all.where((c) => c.key == hit.conversationKey).toList();
++                    if (!mounted || matches.isEmpty) return;
++                    final conversation = matches.first;
++                    await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => Directionality(textDirection: TextDirection.rtl, child: ChatScreen(conversation: conversation, initialSearch: _search.text.trim()))));
++                  },
++                )),
++          ],
+         ],
+       ),
+     );
+@@ -767,9 +858,10 @@
+ }
+ 
+ class _ConversationTile extends StatelessWidget {
+-  const _ConversationTile({required this.conversation, required this.onTap});
++  const _ConversationTile({required this.conversation, required this.onTap, required this.onAction});
+   final Conversation conversation;
+   final VoidCallback onTap;
++  final ValueChanged<String> onAction;
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -809,8 +901,20 @@
+                 children: [
+                   Row(
+                     children: [
++                      if (conversation.isPinned) ...[const Icon(Icons.push_pin_rounded, size: 14, color: _accent), const SizedBox(width: 4)],
+                       Expanded(child: Text(conversation.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15.5, fontWeight: FontWeight.w700))),
+                       Text(_relativeTime(conversation.lastMessageAt), style: const TextStyle(color: _muted, fontSize: 11)),
++                      PopupMenuButton<String>(
++                        tooltip: 'إدارة المحادثة',
++                        onSelected: onAction,
++                        itemBuilder: (_) => [
++                          PopupMenuItem(value: 'pin', child: Text(conversation.isPinned ? 'إلغاء التثبيت' : 'تثبيت المحادثة')),
++                          PopupMenuItem(value: 'archive', child: Text(conversation.isArchived ? 'إلغاء الأرشفة' : 'أرشفة المحادثة')),
++                          const PopupMenuDivider(),
++                          const PopupMenuItem(value: 'delete', child: Text('حذف من ChatVault', style: TextStyle(color: Color(0xFFFF6577)))),
++                        ],
++                        icon: const Icon(Icons.more_vert_rounded, size: 19, color: _muted),
++                      ),
+                     ],
+                   ),
+                   if (!conversation.isGroup && conversation.contactPhone != null) ...[
+@@ -932,8 +1036,9 @@
+ }
+ 
+ class ChatScreen extends StatefulWidget {
+-  const ChatScreen({super.key, required this.conversation});
++  const ChatScreen({super.key, required this.conversation, this.initialSearch = ''});
+   final Conversation conversation;
++  final String initialSearch;
+ 
+   @override
+   State<ChatScreen> createState() => _ChatScreenState();
+@@ -941,7 +1046,9 @@
+ 
+ class _ChatScreenState extends State<ChatScreen> {
+   final _controller = TextEditingController();
++  final _chatSearch = TextEditingController();
+   final _scroll = ScrollController();
++  bool _searching = false;
+   List<ChatMessage> _messages = const [];
+   bool _loading = true;
+   bool _canReply = false;
+@@ -952,6 +1059,10 @@
+   @override
+   void initState() {
+     super.initState();
++    if (widget.initialSearch.trim().isNotEmpty) {
++      _searching = true;
++      _chatSearch.text = widget.initialSearch.trim();
++    }
+     _events = NativeBridge.events.listen((event) {
+       if (event['type'] != 'data_changed') return;
+       final key = event['conversationKey']?.toString();
+@@ -967,6 +1078,7 @@
+     _events?.cancel();
+     _liveDebounce?.cancel();
+     _controller.dispose();
++    _chatSearch.dispose();
+     _scroll.dispose();
+     super.dispose();
+   }
+@@ -1008,10 +1120,24 @@
+ 
+   @override
+   Widget build(BuildContext context) {
++    final searchQuery = _chatSearch.text.trim();
++    final visibleMessages = searchQuery.isEmpty
++        ? _messages
++        : _messages.where((m) {
++            final q = searchQuery.toLowerCase();
++            return m.text.toLowerCase().contains(q) || m.sender.toLowerCase().contains(q) || (m.senderPhone?.contains(searchQuery) ?? false);
++          }).toList();
+     return Scaffold(
+       appBar: AppBar(
+         titleSpacing: 0,
+-        title: Row(
++        title: _searching
++            ? TextField(
++                controller: _chatSearch,
++                autofocus: true,
++                onChanged: (_) => setState(() {}),
++                decoration: const InputDecoration(hintText: 'بحث داخل المحادثة...', border: InputBorder.none, filled: false),
++              )
++            : Row(
+           children: [
+             CircleAvatar(
+               radius: 19,
+@@ -1039,7 +1165,12 @@
+           ],
+         ),
+         actions: [
+-          IconButton(onPressed: () => _showConversationDetails(context, widget.conversation), icon: const Icon(Icons.info_outline_rounded), tooltip: 'تفاصيل المحادثة'),
++          IconButton(
++            onPressed: () => setState(() { _searching = !_searching; if (!_searching) _chatSearch.clear(); }),
++            icon: Icon(_searching ? Icons.close_rounded : Icons.search_rounded),
++            tooltip: _searching ? 'إغلاق البحث' : 'بحث داخل المحادثة',
++          ),
++          if (!_searching) IconButton(onPressed: () => _showConversationDetails(context, widget.conversation), icon: const Icon(Icons.info_outline_rounded), tooltip: 'تفاصيل المحادثة'),
+           IconButton(onPressed: () => _load(), icon: const Icon(Icons.refresh_rounded)),
+         ],
+       ),
+@@ -1056,16 +1187,27 @@
+                 style: TextStyle(color: _muted, fontSize: 11),
+               ),
+             ),
++          if (_searching && searchQuery.isNotEmpty)
++            Container(
++              width: double.infinity,
++              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
++              color: const Color(0xFF183B47),
++              child: Text('نتائج البحث: ${visibleMessages.length}', style: const TextStyle(color: _accent, fontWeight: FontWeight.w700, fontSize: 11.5)),
++            ),
+           Expanded(
+             child: _loading
+                 ? const Center(child: CircularProgressIndicator())
+-                : _messages.isEmpty
+-                    ? const _EmptyState(icon: Icons.mark_chat_unread_outlined, title: 'لا توجد رسائل', subtitle: 'لم يتم تسجيل رسائل في هذه المحادثة بعد.')
++                : visibleMessages.isEmpty
++                    ? _EmptyState(
++                        icon: searchQuery.isEmpty ? Icons.mark_chat_unread_outlined : Icons.search_off_rounded,
++                        title: searchQuery.isEmpty ? 'لا توجد رسائل' : 'لا توجد نتائج',
++                        subtitle: searchQuery.isEmpty ? 'لم يتم تسجيل رسائل في هذه المحادثة بعد.' : 'جرّب كلمة أو رقمًا مختلفًا.',
++                      )
+                     : ListView.builder(
+                         controller: _scroll,
+                         padding: const EdgeInsets.fromLTRB(10, 14, 10, 18),
+-                        itemCount: _messages.length,
+-                        itemBuilder: (_, index) => _MessageBubble(message: _messages[index], isGroup: widget.conversation.isGroup),
++                        itemCount: visibleMessages.length,
++                        itemBuilder: (_, index) => _MessageBubble(message: visibleMessages[index], isGroup: widget.conversation.isGroup, highlightQuery: searchQuery),
+                       ),
+           ),
+           SafeArea(
+@@ -1108,16 +1250,17 @@
+ }
+ 
+ class _MessageBubble extends StatelessWidget {
+-  const _MessageBubble({required this.message, required this.isGroup});
++  const _MessageBubble({required this.message, required this.isGroup, this.highlightQuery = ''});
+   final ChatMessage message;
+   final bool isGroup;
++  final String highlightQuery;
+ 
+   @override
+   Widget build(BuildContext context) {
+     final outgoing = message.outgoing;
+     final bubble = outgoing ? const Color(0xFF075E54) : _panel2;
+     return Align(
+-      alignment: outgoing ? Alignment.centerRight : Alignment.centerLeft,
++      alignment: outgoing ? Alignment.centerLeft : Alignment.centerRight,
+       child: Container(
+         constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * .82),
+         margin: const EdgeInsets.symmetric(vertical: 3),
+@@ -1144,7 +1287,7 @@
+             if (message.text.isNotEmpty && !(message.hasMedia && _isGenericMediaLabel(message.text)))
+               Padding(
+                 padding: EdgeInsets.only(top: message.hasMedia ? 6 : 0),
+-                child: Text(message.text, style: const TextStyle(fontSize: 14, height: 1.35)),
++                child: _LinkifiedHighlightedText(text: message.text, query: highlightQuery),
+               ),
+             const SizedBox(height: 4),
+             Row(
+@@ -1170,6 +1313,91 @@
+   }
+ }
+ 
++class _LinkifiedHighlightedText extends StatelessWidget {
++  const _LinkifiedHighlightedText({required this.text, this.query = ''});
++  final String text;
++  final String query;
++
++  @override
++  Widget build(BuildContext context) {
++    final urlRegex = RegExp(r'((?:https?://|www\.)[^\s]+)', caseSensitive: false);
++    final spans = <InlineSpan>[];
++    var cursor = 0;
++    for (final match in urlRegex.allMatches(text)) {
++      if (match.start > cursor) spans.addAll(_highlightSpans(text.substring(cursor, match.start), query));
++      final link = match.group(0)!;
++      spans.add(TextSpan(
++        text: link,
++        style: const TextStyle(color: Color(0xFF62C9FF), decoration: TextDecoration.underline, decorationColor: Color(0xFF62C9FF), fontWeight: FontWeight.w700),
++        recognizer: TapGestureRecognizer()..onTap = () => NativeBridge.openUrl(link),
++      ));
++      cursor = match.end;
++    }
++    if (cursor < text.length) spans.addAll(_highlightSpans(text.substring(cursor), query));
++    return Text.rich(
++      TextSpan(children: spans, style: const TextStyle(fontSize: 14, height: 1.45, color: Colors.white)),
++      textDirection: TextDirection.rtl,
++      textAlign: TextAlign.start,
++    );
++  }
++}
++
++List<InlineSpan> _highlightSpans(String value, String query) {
++  if (query.trim().isEmpty) return [TextSpan(text: value)];
++  final q = query.trim();
++  final lower = value.toLowerCase();
++  final qLower = q.toLowerCase();
++  final spans = <InlineSpan>[];
++  var start = 0;
++  while (true) {
++    final i = lower.indexOf(qLower, start);
++    if (i < 0) break;
++    if (i > start) spans.add(TextSpan(text: value.substring(start, i)));
++    spans.add(TextSpan(text: value.substring(i, i + q.length), style: const TextStyle(backgroundColor: Color(0xFFFFD54F), color: Colors.black, fontWeight: FontWeight.w800)));
++    start = i + q.length;
++  }
++  if (start < value.length) spans.add(TextSpan(text: value.substring(start)));
++  return spans;
++}
++
++class _SearchResultTile extends StatelessWidget {
++  const _SearchResultTile({required this.message, required this.query, required this.onTap});
++  final ChatMessage message;
++  final String query;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) => Card(
++        margin: const EdgeInsets.only(bottom: 7),
++        child: ListTile(
++          onTap: onTap,
++          leading: CircleAvatar(backgroundColor: _panel2, child: Icon(message.isGroup ? Icons.groups_rounded : Icons.person_rounded, color: _accent)),
++          title: Text(message.conversationTitle.isEmpty ? 'محادثة' : message.conversationTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
++          subtitle: Column(
++            crossAxisAlignment: CrossAxisAlignment.start,
++            children: [
++              if (message.sender.isNotEmpty) Text(message.sender, style: const TextStyle(color: _muted, fontSize: 10.5)),
++              _HighlightedSearchText(text: message.text, query: query),
++            ],
++          ),
++          trailing: Text(_relativeTime(message.postedAt), style: const TextStyle(color: _muted, fontSize: 9.5)),
++        ),
++      );
++}
++
++class _HighlightedSearchText extends StatelessWidget {
++  const _HighlightedSearchText({required this.text, required this.query});
++  final String text;
++  final String query;
++  @override
++  Widget build(BuildContext context) => Text.rich(
++        TextSpan(children: _highlightSpans(text, query), style: const TextStyle(color: Colors.white70, fontSize: 12.5)),
++        maxLines: 3,
++        overflow: TextOverflow.ellipsis,
++        textDirection: TextDirection.rtl,
++      );
++}
++
+ class _MessageMedia extends StatelessWidget {
+   const _MessageMedia({required this.message});
+   final ChatMessage message;
