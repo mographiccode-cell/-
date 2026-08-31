@@ -1,0 +1,53 @@
+        val arr = JSONArray()
+        keys.forEach { item ->
+            arr.put(
+                JSONObject()
+                    .put("id", item.id)
+                    .put("label", item.label)
+                    .put("encrypted", item.encrypted)
+                    .put("iv", item.iv)
+                    .put("createdAt", item.createdAt)
+            )
+        }
+        prefs.edit().putString(PREF_KEYS, arr.toString()).apply()
+    }
+
+    private fun encrypt(value: String): Pair<String, String> {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(value.toByteArray(StandardCharsets.UTF_8))
+        return Base64.encodeToString(encrypted, Base64.NO_WRAP) to Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
+    }
+
+    private fun decrypt(item: StoredKey): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val iv = Base64.decode(item.iv, Base64.NO_WRAP)
+        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, iv))
+        val clear = cipher.doFinal(Base64.decode(item.encrypted, Base64.NO_WRAP))
+        return String(clear, StandardCharsets.UTF_8)
+    }
+
+    private fun secretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (keyStore.getKey(KEYSTORE_ALIAS, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEYSTORE_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build()
+        )
+        return generator.generateKey()
+    }
+
+    private fun maskKey(value: String): String {
+        if (value.length < 12) return "••••••••"
+        return value.take(5) + "••••••••" + value.takeLast(4)
+    }
+}
+
+class GeminiHttpException(val code: Int, message: String) : RuntimeException("Gemini HTTP $code: $message")
