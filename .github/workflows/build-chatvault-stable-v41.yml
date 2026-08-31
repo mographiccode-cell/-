@@ -1,0 +1,104 @@
+name: Build ChatVault Stable v4.1
+
+on:
+  push:
+    branches:
+      - build-chatvault-stable-v41-20260831
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct v3.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/chatvault_v31_payload.b64
+          test "$(wc -c < /tmp/chatvault_v31_payload.b64)" -eq 55880
+          base64 -d /tmp/chatvault_v31_payload.b64 > /tmp/chatvault_v31_payload.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/chatvault_v31_payload.zip' | sha256sum -c -
+          unzip -t /tmp/chatvault_v31_payload.zip
+
+      - name: Create stable v4.1 Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_v41/project
+          mkdir -p chatvault_v41/project
+          cd chatvault_v41/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_v31_payload.zip -d .
+
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+
+          patch -p1 < ../../chatvault_v41/patch_db.diff
+          patch -p1 < ../../chatvault_v41/patch_activity.diff
+          patch -p1 < ../../chatvault_v41/patch_ui.diff
+          patch -p1 < ../../chatvault_v41/patch_manifest.diff
+          patch -p1 < ../../chatvault_v41/patch_pubspec.diff
+
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.stable"/' android/app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+          sed -i 's/android:label="ChatVault"/android:label="ChatVault Stable"/' android/app/src/main/AndroidManifest.xml
+
+          grep -q 'applicationId = "com.mographiccode.chatvault.stable"' android/app/build.gradle.kts
+          grep -q 'version: 4.1.0+11' pubspec.yaml
+          grep -q 'DATABASE_VERSION = 4' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'pickAndShareFile' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'importLegacyDatabase' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'نسخ الرسالة' lib/main.dart
+
+      - name: Get dependencies
+        working-directory: chatvault_v41/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_v41/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_v41/project
+        run: flutter test
+
+      - name: Build unsigned release APK
+        working-directory: chatvault_v41/project
+        run: |
+          flutter build apk --release
+          find build/app/outputs -type f -name '*.apk' -print -exec ls -lh {} \;
+
+      - name: Verify unsigned APK structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find chatvault_v41/project/build/app/outputs -type f -name '*.apk' | head -1)
+          test -n "$APK"
+          test -s "$APK"
+          unzip -t "$APK" >/tmp/apk-unzip-test.txt
+          cp "$APK" chatvault_v41/ChatVault-Stable-v4.1.0-unsigned.apk
+          sha256sum chatvault_v41/ChatVault-Stable-v4.1.0-unsigned.apk | tee chatvault_v41/ChatVault-Stable-v4.1.0-unsigned.sha256
+
+      - name: Upload unsigned APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Stable-v4.1.0-UNSIGNED
+          path: |
+            chatvault_v41/ChatVault-Stable-v4.1.0-unsigned.apk
+            chatvault_v41/ChatVault-Stable-v4.1.0-unsigned.sha256
+          if-no-files-found: error
+          retention-days: 7
