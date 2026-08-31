@@ -1,0 +1,116 @@
+--- a/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
++++ b/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+@@ -8,6 +8,7 @@
+ import android.os.Build
+ import android.net.Uri
+ import android.provider.Settings
++import android.speech.RecognizerIntent
+ import androidx.core.content.FileProvider
+ import io.flutter.embedding.android.FlutterActivity
+ import io.flutter.embedding.engine.FlutterEngine
+@@ -22,18 +23,22 @@
+     private val contactsPermissionRequest = 7302
+     private val shareFileRequest = 7401
+     private val legacyDbRequest = 7402
++    private val voicePromptRequest = 7403
+     private var pendingMediaPermissionResult: MethodChannel.Result? = null
+     private var pendingContactsPermissionResult: MethodChannel.Result? = null
+     private var pendingShareResult: MethodChannel.Result? = null
+     private var pendingSharePackage: String = "com.whatsapp"
+     private var pendingShareMime: String = "*/*"
+     private var pendingLegacyImportResult: MethodChannel.Result? = null
++    private var pendingVoicePromptResult: MethodChannel.Result? = null
+     private var eventSink: EventChannel.EventSink? = null
+     private lateinit var database: LocalMessageDatabase
++    private lateinit var gemini: GeminiManager
+ 
+     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+         super.configureFlutterEngine(flutterEngine)
+         database = LocalMessageDatabase(applicationContext)
++        gemini = GeminiManager(applicationContext)
+ 
+         EventChannel(flutterEngine.dartExecutor.binaryMessenger, eventChannelName).setStreamHandler(
+             object : EventChannel.StreamHandler {
+@@ -160,6 +165,38 @@
+                     mimeType = call.argument<String>("mimeType").orEmpty().ifBlank { "*/*" },
+                 )
+                 "importLegacyDatabaseFile" -> beginLegacyDatabasePick(result)
++                "geminiSettings" -> result.success(gemini.settings())
++                "geminiAddKey" -> runCatching {
++                    gemini.addKey(call.argument<String>("label").orEmpty(), call.argument<String>("apiKey").orEmpty())
++                }.fold(result::success) { result.error("GEMINI_KEY", it.message ?: "تعذر حفظ المفتاح", null) }
++                "geminiDeleteKey" -> runCatching {
++                    gemini.deleteKey(call.argument<String>("id").orEmpty())
++                }.fold(result::success) { result.error("GEMINI_KEY", it.message ?: "تعذر حذف المفتاح", null) }
++                "geminiSetActiveKey" -> runCatching {
++                    gemini.setActiveKey(call.argument<String>("id").orEmpty())
++                }.fold(result::success) { result.error("GEMINI_KEY", it.message ?: "تعذر اختيار المفتاح", null) }
++                "geminiSetModel" -> runCatching {
++                    gemini.setModel(call.argument<String>("model").orEmpty())
++                }.fold(result::success) { result.error("GEMINI_MODEL", it.message ?: "تعذر اختيار الموديل", null) }
++                "geminiSetAutoFallback" -> result.success(gemini.setAutoFallback(call.argument<Boolean>("enabled") ?: true))
++                "geminiTestKey" -> Thread {
++                    val response = runCatching { gemini.testKey(call.argument<String>("id")) }
++                    runOnUiThread { response.fold(result::success) { result.error("GEMINI_TEST", it.message ?: "فشل اختبار Gemini", null) } }
++                }.start()
++                "geminiAnalyzeConversation" -> Thread {
++                    val response = runCatching {
++                        gemini.analyzeConversation(
++                            database = database,
++                            conversationKey = call.argument<String>("conversationKey").orEmpty(),
++                            prompt = call.argument<String>("prompt").orEmpty(),
++                            fromMs = call.argument<Number>("fromMs")?.toLong(),
++                            toMs = call.argument<Number>("toMs")?.toLong(),
++                            includeMedia = call.argument<Boolean>("includeMedia") ?: true,
++                        )
++                    }
++                    runOnUiThread { response.fold(result::success) { result.error("GEMINI_ANALYZE", it.message ?: "تعذر تحليل المحادثة", null) } }
++                }.start()
++                "startVoicePrompt" -> beginVoicePrompt(result)
+                 "autoImportLegacyIfNeeded" -> Thread {
+                     val prefs = getSharedPreferences("chatvault_migrations", MODE_PRIVATE)
+                     if (prefs.getBoolean("legacy_auto_attempt_v41", false)) {
+@@ -213,6 +250,17 @@
+                 val ok = shareUriToWhatsApp(uri, pendingSharePackage, pendingShareMime)
+                 pending.success(ok)
+             }
++            voicePromptRequest -> {
++                val pending = pendingVoicePromptResult
++                pendingVoicePromptResult = null
++                if (pending == null) return
++                if (resultCode != Activity.RESULT_OK) {
++                    pending.success("")
++                    return
++                }
++                val values = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS).orEmpty()
++                pending.success(values.firstOrNull().orEmpty())
++            }
+             legacyDbRequest -> {
+                 val pending = pendingLegacyImportResult
+                 pendingLegacyImportResult = null
+@@ -270,6 +318,25 @@
+         true
+     }.getOrDefault(false)
+ 
++    private fun beginVoicePrompt(result: MethodChannel.Result) {
++        if (pendingVoicePromptResult != null) {
++            result.error("BUSY", "يوجد إدخال صوتي قيد التنفيذ", null)
++            return
++        }
++        pendingVoicePromptResult = result
++        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
++            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
++            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ar")
++            putExtra(RecognizerIntent.EXTRA_PROMPT, "قل طلب التحليل")
++            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
++        }
++        runCatching { startActivityForResult(intent, voicePromptRequest) }
++            .onFailure {
++                pendingVoicePromptResult = null
++                result.error("VOICE_UNAVAILABLE", "خدمة الإدخال الصوتي غير متاحة على الجهاز", null)
++            }
++    }
++
+     private fun beginLegacyDatabasePick(result: MethodChannel.Result) {
+         if (pendingLegacyImportResult != null) {
+             result.error("BUSY", "يوجد استيراد قيد التنفيذ", null)
