@@ -1,0 +1,12 @@
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -1,7 +1,7 @@
+ name: chatvault
+-description: Local WhatsApp notification conversation archive and analysis app.
++description: Local WhatsApp notification archive with optional Gemini multimodal analysis.
+ publish_to: "none"
+-version: 4.1.0+11
++version: 5.1.0+3
+ 
+ environment:
+   sdk: ">=3.8.0 <4.0.0"
