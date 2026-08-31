@@ -1,0 +1,117 @@
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -251,6 +251,62 @@
+     return Map<String, dynamic>.from(raw);
+   }
+ 
++  static Future<Map<String, dynamic>> geminiSettings() async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiSettings') ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiAddKey(String label, String apiKey) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiAddKey', <String, dynamic>{'label': label, 'apiKey': apiKey}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiDeleteKey(String id) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiDeleteKey', <String, dynamic>{'id': id}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiSetActiveKey(String id) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiSetActiveKey', <String, dynamic>{'id': id}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiSetModel(String model) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiSetModel', <String, dynamic>{'model': model}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiSetAutoFallback(bool enabled) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiSetAutoFallback', <String, dynamic>{'enabled': enabled}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiTestKey([String? id]) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiTestKey', <String, dynamic>{'id': id}) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> geminiAnalyzeConversation({
++    required String conversationKey,
++    required String prompt,
++    int? fromMs,
++    int? toMs,
++    bool includeMedia = true,
++  }) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('geminiAnalyzeConversation', <String, dynamic>{
++          'conversationKey': conversationKey,
++          'prompt': prompt,
++          'fromMs': fromMs,
++          'toMs': toMs,
++          'includeMedia': includeMedia,
++        }) ??
++        const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<String> startVoicePrompt() async =>
++      await _channel.invokeMethod<String>('startVoicePrompt') ?? '';
++
+   static Future<void> clearData() async => _channel.invokeMethod<void>('clearData');
+ }
+ 
+@@ -1191,6 +1247,201 @@
+     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('تعذر فتح WhatsApp لإرسال الملف.')));
+   }
+ 
++  Future<void> _showGeminiAnalysis() async {
++    Map<String, dynamic> settings;
++    try {
++      settings = await NativeBridge.geminiSettings();
++    } on PlatformException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر قراءة إعدادات Gemini.')));
++      return;
++    }
++    final keys = (settings['keys'] as List?)?.whereType<Map>().toList() ?? const [];
++    if (keys.isEmpty) {
++      if (!mounted) return;
++      await showDialog<void>(
++        context: context,
++        builder: (_) => AlertDialog(
++          title: const Text('أضف Gemini API Key أولًا'),
++          content: const Text('اذهب إلى الإعدادات ← Gemini AI وأضف مفتاحك، ثم عد إلى المحادثة واضغط زر التحليل.'),
++          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('حسنًا'))],
++        ),
++      );
++      return;
++    }
++
++    final promptController = TextEditingController(text: 'لخص هذه المحادثة، واستخرج أهم النقاط والقرارات والمهام والمواعيد والمخاطر إن وجدت.');
++    bool includeMedia = true;
++    bool running = false;
++    String scope = 'all';
++    if (!mounted) return;
++    await showModalBottomSheet<void>(
++      context: context,
++      isScrollControlled: true,
++      backgroundColor: _panel,
++      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
++      builder: (sheetContext) => StatefulBuilder(
++        builder: (sheetContext, setSheetState) {
++          Future<void> runAnalysis() async {
++            final prompt = promptController.text.trim();
++            if (prompt.isEmpty || running) return;
++            setSheetState(() => running = true);
++            final now = DateTime.now().millisecondsSinceEpoch;
++            int? fromMs;
++            if (scope == '7d') fromMs = now - const Duration(days: 7).inMilliseconds;
++            if (scope == '30d') fromMs = now - const Duration(days: 30).inMilliseconds;
++            if (scope == '90d') fromMs = now - const Duration(days: 90).inMilliseconds;
++            try {
++              final result = await NativeBridge.geminiAnalyzeConversation(
++                conversationKey: widget.conversation.key,
++                prompt: prompt,
++                fromMs: fromMs,
