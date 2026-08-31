@@ -1,0 +1,95 @@
+name: Build ChatVault Stable v4
+
+on:
+  push:
+    branches:
+      - build-chatvault-stable-v40-20260831
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct v3.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/chatvault_v31_payload.b64
+          test "$(wc -c < /tmp/chatvault_v31_payload.b64)" -eq 55880
+          base64 -d /tmp/chatvault_v31_payload.b64 > /tmp/chatvault_v31_payload.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/chatvault_v31_payload.zip' | sha256sum -c -
+          unzip -t /tmp/chatvault_v31_payload.zip
+
+      - name: Create stable Android project and apply v4 patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_v40/project
+          mkdir -p chatvault_v40/project
+          cd chatvault_v40/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_v31_payload.zip -d .
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.stable"/' android/app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+          sed -i 's/android:label="ChatVault"/android:label="ChatVault Stable"/' android/app/src/main/AndroidManifest.xml
+          grep -q 'applicationId = "com.mographiccode.chatvault.stable"' android/app/build.gradle.kts
+          grep -q 'DATABASE_VERSION = 3' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'searchMessages' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'setConversationArchived' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q '_LinkifiedHighlightedText' lib/main.dart
+          grep -q 'version: 4.0.0+10' pubspec.yaml
+
+      - name: Get dependencies
+        working-directory: chatvault_v40/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_v40/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_v40/project
+        run: flutter test
+
+      - name: Build unsigned release APK
+        working-directory: chatvault_v40/project
+        run: |
+          flutter build apk --release
+          find build/app/outputs -type f -name '*.apk' -print -exec ls -lh {} \;
+
+      - name: Verify unsigned APK structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=$(find chatvault_v40/project/build/app/outputs -type f -name '*.apk' | head -1)
+          test -n "$APK"
+          test -s "$APK"
+          unzip -t "$APK" >/tmp/apk-unzip-test.txt
+          cp "$APK" chatvault_v40/ChatVault-v4.0.0-unsigned.apk
+          sha256sum chatvault_v40/ChatVault-v4.0.0-unsigned.apk | tee chatvault_v40/ChatVault-v4.0.0-unsigned.sha256
+
+      - name: Upload unsigned APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-v4.0.0-UNSIGNED
+          path: |
+            chatvault_v40/ChatVault-v4.0.0-unsigned.apk
+            chatvault_v40/ChatVault-v4.0.0-unsigned.sha256
+          if-no-files-found: error
+          retention-days: 7
