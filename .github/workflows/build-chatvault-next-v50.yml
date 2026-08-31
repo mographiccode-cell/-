@@ -1,0 +1,124 @@
+name: Build ChatVault Next v5.0
+
+on:
+  push:
+    branches:
+      - build-chatvault-next-v50-20260831
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct v3.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/chatvault_v31_payload.b64
+          test "$(wc -c < /tmp/chatvault_v31_payload.b64)" -eq 55880
+          base64 -d /tmp/chatvault_v31_payload.b64 > /tmp/chatvault_v31_payload.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/chatvault_v31_payload.zip' | sha256sum -c -
+          unzip -t /tmp/chatvault_v31_payload.zip
+
+      - name: Create ChatVault Next project
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf chatvault_next/project
+          mkdir -p chatvault_next/project
+          cd chatvault_next/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/chatvault_v31_payload.zip -d .
+
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+
+          patch -p1 < ../../chatvault_v41/patch_db.diff
+          patch -p1 < ../../chatvault_v41/patch_activity.diff
+          patch -p1 < ../../chatvault_v41/patch_ui.diff
+          patch -p1 < ../../chatvault_v41/patch_manifest.diff
+          patch -p1 < ../../chatvault_v41/patch_pubspec.diff
+
+          sed -i 's/version: 4.1.0+11/version: 5.0.0+1/' pubspec.yaml
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.next"/' android/app/build.gradle.kts
+          sed -i 's/android:label="ChatVault"/android:label="ChatVault Next"/' android/app/src/main/AndroidManifest.xml
+
+          grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
+          grep -q 'signingConfig = signingConfigs.getByName("debug")' android/app/build.gradle.kts
+          grep -q 'version: 5.0.0+1' pubspec.yaml
+          grep -q 'DATABASE_VERSION = 4' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'com.mographiccode.chatvault.v31' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'importLegacyDatabase' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'pickAndShareFile' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'نسخ الرسالة' lib/main.dart
+
+      - name: Get dependencies
+        working-directory: chatvault_next/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_next/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_next/project
+        run: flutter test
+
+      - name: Build Gradle-signed release APK
+        working-directory: chatvault_next/project
+        run: flutter build apk --release
+
+      - name: Verify installable APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='chatvault_next/project/build/app/outputs/flutter-apk/app-release.apk'
+          test -s "$APK"
+          APT=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)
+          ZA=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
+          "$APT" verify --verbose --print-certs "$APK" | tee chatvault_next/apksigner-verify.txt
+          "$ZA" -c -P 16 -v 4 "$APK" > chatvault_next/zipalign-verify.txt
+          grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' chatvault_next/apksigner-verify.txt
+          grep -q 'Verification successful' chatvault_next/zipalign-verify.txt
+          unzip -t "$APK" >/tmp/apk-unzip-test.txt
+          cp "$APK" chatvault_next/ChatVault-Next-v5.0.0.apk
+          cp "$HOME/.android/debug.keystore" chatvault_next/ChatVault-Next-signing-debug.keystore
+          sha256sum chatvault_next/ChatVault-Next-v5.0.0.apk | tee chatvault_next/ChatVault-Next-v5.0.0.sha256
+          keytool -list -v -keystore chatvault_next/ChatVault-Next-signing-debug.keystore -storepass android -alias androiddebugkey | grep -E 'SHA256:|Valid from:' > chatvault_next/signing-certificate.txt
+          ls -lh chatvault_next/ChatVault-Next-v5.0.0.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Next-v5.0.0-INSTALLABLE
+          path: |
+            chatvault_next/ChatVault-Next-v5.0.0.apk
+            chatvault_next/ChatVault-Next-v5.0.0.sha256
+            chatvault_next/apksigner-verify.txt
+            chatvault_next/zipalign-verify.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signing key backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Next-v5.0.0-SIGNING-PRIVATE
+          path: |
+            chatvault_next/ChatVault-Next-signing-debug.keystore
+            chatvault_next/signing-certificate.txt
+          if-no-files-found: error
+          retention-days: 1
