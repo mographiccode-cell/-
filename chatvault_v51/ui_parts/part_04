@@ -1,0 +1,101 @@
++    final key = TextEditingController();
++    final values = await showDialog<List<String>>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('إضافة Gemini API Key'),
++        content: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            TextField(controller: label, decoration: const InputDecoration(labelText: 'اسم المفتاح', hintText: 'مثال: حسابي الرئيسي')),
++            const SizedBox(height: 10),
++            TextField(controller: key, obscureText: true, autocorrect: false, enableSuggestions: false, decoration: const InputDecoration(labelText: 'API Key', hintText: 'ألصق المفتاح هنا')),
++            const SizedBox(height: 8),
++            const Text('يُحفظ المفتاح مشفرًا داخل Android Keystore ولا يُكتب داخل كود التطبيق.', style: TextStyle(color: _muted, fontSize: 10.5, height: 1.4)),
++          ],
++        ),
++        actions: [
++          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('إلغاء')),
++          FilledButton(onPressed: () => Navigator.pop(dialogContext, [label.text, key.text]), child: const Text('حفظ')),
++        ],
++      ),
++    );
++    label.dispose();
++    key.dispose();
++    if (values == null || values.length < 2 || values[1].trim().isEmpty) return;
++    setState(() => _working = true);
++    try {
++      final next = await NativeBridge.geminiAddKey(values[0], values[1]);
++      if (mounted) setState(() => _settings = next);
++    } on PlatformException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'تعذر حفظ المفتاح.')));
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _test(String id) async {
++    if (_working) return;
++    setState(() => _working = true);
++    try {
++      final result = await NativeBridge.geminiTestKey(id);
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('المفتاح يعمل ✅ • ${result['model']} • ${result['latencyMs']}ms')));
++    } on PlatformException catch (e) {
++      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? 'فشل اختبار المفتاح.')));
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _setActive(String id) async {
++    final next = await NativeBridge.geminiSetActiveKey(id);
++    if (mounted) setState(() => _settings = next);
++  }
++
++  Future<void> _delete(String id, String label) async {
++    final ok = await showDialog<bool>(
++      context: context,
++      builder: (dialogContext) => AlertDialog(
++        title: const Text('حذف المفتاح؟'),
++        content: Text('سيتم حذف «$label» من هذا الجهاز.'),
++        actions: [
++          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('إلغاء')),
++          FilledButton.tonal(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('حذف')),
++        ],
++      ),
++    );
++    if (ok != true) return;
++    final next = await NativeBridge.geminiDeleteKey(id);
++    if (mounted) setState(() => _settings = next);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final models = ((_settings['models'] as List?) ?? const ['gemini-3.7-flash']).map((e) => e.toString()).toList();
++    final model = _settings['model']?.toString() ?? 'gemini-3.7-flash';
++    final fallback = _bool(_settings['autoFallback']);
++    return Directionality(
++      textDirection: TextDirection.rtl,
++      child: SafeArea(
++        child: Padding(
++          padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
++          child: _loading
++              ? const SizedBox(height: 260, child: Center(child: CircularProgressIndicator()))
++              : SingleChildScrollView(
++                  child: Column(
++                    mainAxisSize: MainAxisSize.min,
++                    crossAxisAlignment: CrossAxisAlignment.start,
++                    children: [
++                      Center(child: Container(width: 44, height: 4, decoration: BoxDecoration(color: _muted.withValues(alpha: .35), borderRadius: BorderRadius.circular(12)))),
++                      const SizedBox(height: 14),
++                      const Row(children: [Icon(Icons.auto_awesome_rounded, color: _accent), SizedBox(width: 9), Text('Gemini AI', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))]),
++                      const SizedBox(height: 5),
++                      const Text('المفاتيح ملكك أنت (BYOK). لا يبدأ أي تحليل أو رفع بيانات إلا عندما تطلبه من داخل محادثة محددة.', style: TextStyle(color: _muted, fontSize: 11.5, height: 1.45)),
++                      const SizedBox(height: 14),
++                      DropdownButtonFormField<String>(
++                        value: models.contains(model) ? model : models.first,
++                        decoration: const InputDecoration(labelText: 'موديل Gemini'),
++                        items: models.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
++                        onChanged: _working
++                            ? null
++                            : (value) async {
++                                if (value == null) return;
