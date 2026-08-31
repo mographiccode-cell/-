@@ -1,0 +1,106 @@
+        fromMs: Long?,
+        toMs: Long?,
+        includeMedia: Boolean,
+    ): Map<String, Any> {
+        val userPrompt = prompt.trim()
+        require(userPrompt.isNotBlank()) { "اكتب طلب التحليل أولًا." }
+        val details = database.getConversationDetails(conversationKey)
+        require(details.isNotEmpty()) { "المحادثة غير موجودة." }
+        val allMessages = database.getConversationMessages(conversationKey)
+        val selected = allMessages.filter { row ->
+            val ts = (row["postedAt"] as? Number)?.toLong() ?: 0L
+            (fromMs == null || ts >= fromMs) && (toMs == null || ts <= toMs)
+        }
+        require(selected.isNotEmpty()) { "لا توجد رسائل ضمن النطاق المحدد." }
+
+        val transcript = buildTranscript(details, selected)
+        val media = if (includeMedia) {
+            selected.mapNotNull { row ->
+                val path = row["mediaPath"]?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val file = File(path)
+                if (!file.exists() || !file.isFile || file.length() <= 0L) return@mapNotNull null
+                Triple(file, row["mimeType"]?.toString(), (row["postedAt"] as? Number)?.toLong() ?: 0L)
+            }.distinctBy { it.first.absolutePath }.sortedBy { it.third }
+        } else emptyList()
+
+        val skippedMedia = (media.size - MAX_MEDIA_FILES).coerceAtLeast(0)
+        val chosenMedia = media.takeLast(MAX_MEDIA_FILES)
+        val model = prefs.getString(PREF_MODEL, DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
+        val orderedKeys = keyOrder(null)
+        require(orderedKeys.isNotEmpty()) { "أضف Gemini API Key من الإعدادات أولًا." }
+        val fallback = prefs.getBoolean(PREF_FALLBACK, true)
+        var lastError: Throwable? = null
+
+        orderedKeys.forEachIndexed { index, entry ->
+            if (index > 0 && !fallback) return@forEachIndexed
+            try {
+                val result = performAnalysis(
+                    apiKey = entry.second,
+                    model = model,
+                    details = details,
+                    transcript = transcript,
+                    userPrompt = userPrompt,
+                    media = chosenMedia,
+                    skippedMedia = skippedMedia,
+                ).toMutableMap()
+                result["keyId"] = entry.first.id
+                result["keyLabel"] = entry.first.label
+                result["messageCount"] = selected.size
+                result["mediaRequested"] = media.size
+                result["mediaIncluded"] = chosenMedia.size
+                result["mediaSkipped"] = skippedMedia
+                return result
+            } catch (e: Throwable) {
+                lastError = e
+                if (e !is GeminiHttpException || e.code !in setOf(401, 403, 429, 500, 502, 503, 504)) throw e
+            }
+        }
+        throw lastError ?: IllegalStateException("تعذر الاتصال بـ Gemini.")
+    }
+
+    private fun performAnalysis(
+        apiKey: String,
+        model: String,
+        details: Map<String, Any?>,
+        transcript: String,
+        userPrompt: String,
+        media: List<Triple<File, String?, Long>>,
+        skippedMedia: Int,
+    ): Map<String, Any> {
+        val uploaded = mutableListOf<RemoteFile>()
+        try {
+            media.forEach { item ->
+                if (item.first.length() > MAX_SINGLE_FILE) return@forEach
+                uploaded += uploadFile(apiKey, item.first, item.second)
+            }
+
+            val displayTitle = details["displayTitle"]?.toString().orEmpty().ifBlank { "محادثة واتساب" }
+            val isGroup = details["isGroup"] == true
+            val system = """
+                أنت محلل محادثات داخل تطبيق ChatVault. حلل فقط البيانات التي اختار المستخدم إرسالها الآن.
+                اكتب التقرير بالعربية بشكل منظم وواضح، واستشهد بالتواريخ/الأسماء عند الحاجة، ولا تخترع معلومات غير موجودة.
+                إذا كانت المرفقات غير كافية أو غير قابلة للفهم فاذكر ذلك صراحة.
+            """.trimIndent()
+            val text = buildString {
+                appendLine("طلب المستخدم:")
+                appendLine(userPrompt)
+                appendLine()
+                appendLine("المحادثة: $displayTitle")
+                appendLine("النوع: ${if (isGroup) "مجموعة" else "محادثة فردية"}")
+                if (skippedMedia > 0) appendLine("ملاحظة تقنية: يوجد $skippedMedia ملف وسائط إضافي خارج الحد الحالي ولم يتم إرساله في هذه الجولة.")
+                appendLine()
+                appendLine("النص الكامل ضمن النطاق المحدد:")
+                append(transcript)
+            }
+
+            val input = JSONArray().put(JSONObject().put("type", "text").put("text", text))
+            uploaded.forEach { remote ->
+                input.put(
+                    JSONObject()
+                        .put("type", interactionType(remote.mimeType))
+                        .put("uri", remote.uri)
+                        .put("mime_type", remote.mimeType)
+                )
+            }
+            val body = JSONObject()
+                .put("model", model)
