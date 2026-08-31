@@ -56,6 +56,7 @@ jobs:
           sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.stable"/' android/app/build.gradle.kts
           sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
           sed -i 's/android:label="ChatVault"/android:label="ChatVault Stable"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's/if (!mounted || matches.isEmpty) return;/if (!context.mounted || matches.isEmpty) return;/' lib/main.dart
 
           grep -q 'applicationId = "com.mographiccode.chatvault.stable"' android/app/build.gradle.kts
           grep -q 'version: 4.1.0+11' pubspec.yaml
@@ -63,6 +64,7 @@ jobs:
           grep -q 'pickAndShareFile' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'importLegacyDatabase' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
           grep -q 'نسخ الرسالة' lib/main.dart
+          grep -q 'if (!context.mounted || matches.isEmpty) return;' lib/main.dart
 
       - name: Get dependencies
         working-directory: chatvault_v41/project
