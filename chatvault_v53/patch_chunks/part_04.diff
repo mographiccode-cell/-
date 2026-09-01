@@ -1,0 +1,258 @@
++                "chooseWhatsAppMediaFolder" -> beginWhatsAppMediaFolderPick(result)
++                "syncWhatsAppMedia" -> Thread {
++                    val report = runCatching {
++                        MediaCaptureManager(applicationContext).syncAll(
++                            mediaStoreAllowed = hasMediaPermissions(),
++                            limitPerKind = call.argument<Int>("limitPerKind") ?: 600,
++                            maxFolderFiles = call.argument<Int>("maxFolderFiles") ?: 5000,
++                        ).toMap()
++                    }.getOrElse {
++                        mapOf<String, Any>(
++                            "mediaStoreAdded" to 0,
++                            "folderAdded" to 0,
++                            "relinked" to 0,
++                            "totalAdded" to 0,
++                            "error" to (it.message ?: "تعذر مزامنة وسائط واتساب"),
++                        )
++                    }
++                    runOnUiThread { result.success(report) }
++                }.start()
+                 "getConversations" -> result.success(database.getConversations(
+                     call.argument<String>("query").orEmpty(),
+                     call.argument<Boolean>("archivedOnly") ?: false,
+@@ -115,6 +141,14 @@
+                 "getConversationDetails" -> result.success(database.getConversationDetails(call.argument<String>("conversationKey").orEmpty()))
+                 "getDeletedMessages" -> result.success(database.getDeletedMessages())
+                 "getMedia" -> result.success(database.getMedia())
++                "getConversationMedia" -> result.success(database.getMediaForConversation(
++                    call.argument<String>("conversationKey").orEmpty(),
++                    call.argument<String>("kind"),
++                ))
++                "assignMediaToConversation" -> result.success(database.assignMediaToConversation(
++                    (call.argument<Number>("mediaId")?.toLong() ?: -1L),
++                    call.argument<String>("conversationKey").orEmpty(),
++                ))
+                 "getStats" -> result.success(database.getStats())
+                 "canReply" -> result.success(ReplyRegistry.canReply(call.argument<String>("conversationKey").orEmpty()))
+                 "sendReply" -> {
+@@ -265,6 +299,29 @@
+                 val values = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS).orEmpty()
+                 pending.success(values.firstOrNull().orEmpty())
+             }
++            mediaTreeRequest -> {
++                val pending = pendingMediaTreeResult
++                pendingMediaTreeResult = null
++                val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
++                if (pending == null) return
++                if (uri == null) {
++                    pending.success(mapOf<String, Any>("success" to false, "cancelled" to true))
++                    return
++                }
++                val report = runCatching {
++                    contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                    val manager = MediaCaptureManager(applicationContext)
++                    val linkedPackage = manager.savePersistedTreeUri(uri)
++                    mapOf<String, Any>(
++                        "success" to true,
++                        "packageName" to linkedPackage,
++                        "folderCount" to manager.persistedTreeCount(),
++                    )
++                }.getOrElse {
++                    mapOf<String, Any>("success" to false, "error" to (it.message ?: "تعذر حفظ صلاحية مجلد واتساب"))
++                }
++                pending.success(report)
++            }
+             legacyDbRequest -> {
+                 val pending = pendingLegacyImportResult
+                 pendingLegacyImportResult = null
+@@ -341,6 +398,25 @@
+             }
+     }
+ 
++    private fun beginWhatsAppMediaFolderPick(result: MethodChannel.Result) {
++        if (pendingMediaTreeResult != null) {
++            result.error("BUSY", "يوجد اختيار مجلد وسائط قيد التنفيذ", null)
++            return
++        }
++        pendingMediaTreeResult = result
++        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
++            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
++            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
++            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
++        }
++        runCatching { startActivityForResult(intent, mediaTreeRequest) }
++            .onFailure {
++                pendingMediaTreeResult = null
++                result.error("PICKER_ERROR", it.message ?: "تعذر فتح اختيار مجلد واتساب", null)
++            }
++    }
++
+     private fun beginLegacyDatabasePick(result: MethodChannel.Result) {
+         if (pendingLegacyImportResult != null) {
+             result.error("BUSY", "يوجد استيراد قيد التنفيذ", null)
+ diff -ruN '--exclude=.dart_tool' '--exclude=.idea' '--exclude=*.orig' '--exclude=pubspec.lock' source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/MediaCaptureManager.kt source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/MediaCaptureManager.kt
+--- source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/MediaCaptureManager.kt	2026-08-29 20:39:08.000000000 +0000
++++ source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/MediaCaptureManager.kt	2026-09-01 17:56:43.307680690 +0000
+@@ -2,20 +2,36 @@
+ 
+ import android.content.ContentUris
+ import android.content.Context
+-import android.database.Cursor
+ import android.net.Uri
+ import android.os.Build
++import android.provider.DocumentsContract
+ import android.provider.MediaStore
++import android.webkit.MimeTypeMap
+ import java.io.File
+ import java.io.FileOutputStream
+ import java.security.MessageDigest
+ 
+ class MediaCaptureManager(private val context: Context) {
+     private val db = LocalMessageDatabase(context)
++    private val prefs = context.getSharedPreferences("chatvault_media_access", Context.MODE_PRIVATE)
+     private val archiveDir: File by lazy {
+         File(context.filesDir, "whatsapp_archive/media").apply { mkdirs() }
+     }
+ 
++    data class SyncReport(
++        val mediaStoreAdded: Int,
++        val folderAdded: Int,
++        val relinked: Int,
++    ) {
++        val totalAdded: Int get() = mediaStoreAdded + folderAdded
++        fun toMap(): Map<String, Any> = mapOf(
++            "mediaStoreAdded" to mediaStoreAdded,
++            "folderAdded" to folderAdded,
++            "relinked" to relinked,
++            "totalAdded" to totalAdded,
++        )
++    }
++
+     fun captureNotificationUri(
+         uri: Uri?,
+         mimeType: String?,
+@@ -25,83 +41,251 @@
+     ): String? {
+         if (uri == null) return null
+         return runCatching {
+-            val ext = extensionFor(mimeType)
++            val resolvedMime = normalizeMimeType(uri, mimeType, null)
++            val ext = extensionFor(resolvedMime)
+             val fileName = "notification_${postedAt}_${messageId}${if (ext.isBlank()) "" else ".$ext"}"
+             val target = File(archiveDir, fileName)
+             context.contentResolver.openInputStream(uri)?.use { input ->
+                 FileOutputStream(target).use { output -> input.copyTo(output) }
+             } ?: return null
+-            val type = mimeToType(mimeType)
+-            db.attachMediaToMessage(messageId, target.absolutePath, mimeType, type)
+-            db.insertMedia(packageName, fileName, mimeType, uri.toString(), target.absolutePath, postedAt, messageId)
++            val type = mimeToType(resolvedMime)
++            db.attachMediaToMessage(messageId, target.absolutePath, resolvedMime, type)
++            db.insertMedia(
++                packageName = packageName,
++                fileName = fileName,
++                mimeType = resolvedMime,
++                originalUri = uri.toString(),
++                localPath = target.absolutePath,
++                sourceCreatedAt = postedAt,
++                messageId = messageId,
++                fileSize = target.length(),
++                linkConfidence = 1.0,
++                linkSource = "notification_uri",
++            )
+             target.absolutePath
+         }.getOrNull()
+     }
+ 
+-    fun scanRecentMedia(limitPerKind: Int = 60): Int {
++    fun scanRecentMedia(limitPerKind: Int = 120): Int {
+         var copied = 0
+         copied += scanCollection(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, limitPerKind)
+         copied += scanCollection(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, limitPerKind)
+         copied += scanCollection(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, limitPerKind)
++        copied += scanCollection(MediaStore.Files.getContentUri("external"), limitPerKind * 2, documentsOnly = true)
++        return copied
++    }
++
++    fun syncAll(mediaStoreAllowed: Boolean, limitPerKind: Int = 500, maxFolderFiles: Int = 4000): SyncReport {
++        val store = if (mediaStoreAllowed) scanRecentMedia(limitPerKind) else 0
++        val folder = scanPersistedTrees(maxFolderFiles)
++        val relinked = db.relinkUnassignedMedia(3000)
++        return SyncReport(store, folder, relinked)
++    }
++
++    fun hasPersistedTreeAccess(): Boolean = persistedTreeUris().isNotEmpty()
++
++    fun persistedTreeCount(): Int = persistedTreeUris().size
++
++    fun savePersistedTreeUri(uri: Uri): String {
++        val packageName = packageFromTreeUri(uri)
++        prefs.edit().putString(treePreferenceKey(packageName), uri.toString()).apply()
++        return packageName
++    }
++
++    fun scanPersistedTrees(maxFilesPerTree: Int = 4000): Int {
++        var copied = 0
++        persistedTreeUris().forEach { (packageName, treeUri) ->
++            copied += scanTree(treeUri, packageName, maxFilesPerTree)
++        }
+         return copied
+     }
+ 
+-    private fun scanCollection(collection: Uri, limit: Int): Int {
++    private fun persistedTreeUris(): List<Pair<String, Uri>> {
++        val result = mutableListOf<Pair<String, Uri>>()
++        listOf("com.whatsapp", "com.whatsapp.w4b").forEach { packageName ->
++            val raw = prefs.getString(treePreferenceKey(packageName), null).orEmpty()
++            if (raw.isBlank()) return@forEach
++            val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return@forEach
++            val persisted = context.contentResolver.persistedUriPermissions.any {
++                it.uri == uri && it.isReadPermission
++            }
++            if (persisted) result += packageName to uri
++            else prefs.edit().remove(treePreferenceKey(packageName)).apply()
++        }
++        return result
++    }
++
++    private fun treePreferenceKey(packageName: String): String = "media_tree_${packageName.replace('.', '_')}"
++
++    private fun scanCollection(collection: Uri, limit: Int, documentsOnly: Boolean = false): Int {
+         val projection = buildList {
+             add(MediaStore.MediaColumns._ID)
+             add(MediaStore.MediaColumns.DISPLAY_NAME)
+             add(MediaStore.MediaColumns.MIME_TYPE)
+             add(MediaStore.MediaColumns.DATE_ADDED)
++            add(MediaStore.MediaColumns.DATE_MODIFIED)
++            add(MediaStore.MediaColumns.SIZE)
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.MediaColumns.RELATIVE_PATH)
+             else add(MediaStore.MediaColumns.DATA)
+         }.toTypedArray()
+-        val sortOrder = "${MediaStore.MediaColumns.DATE_ADDED} DESC"
++        val pathColumn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA
++        val selection = "($pathColumn LIKE ? OR $pathColumn LIKE ? OR $pathColumn LIKE ?)"
++        val selectionArgs = arrayOf("%WhatsApp%", "%com.whatsapp%", "%com.whatsapp.w4b%")
++        val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+         var copied = 0
+         val cursor = runCatching {
+-            context.contentResolver.query(collection, projection, null, null, sortOrder)
++            context.contentResolver.query(collection, projection, selection, selectionArgs, sortOrder)
+         }.getOrNull() ?: return 0
+         cursor.use {
++            val idIndex = it.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
++            val nameIndex = it.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
++            val mimeIndex = it.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
++            val addedIndex = it.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
++            val modifiedIndex = it.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
++            val sizeIndex = it.getColumnIndex(MediaStore.MediaColumns.SIZE)
++            val pathIndex = it.getColumnIndex(pathColumn)
+             var inspected = 0
+             while (it.moveToNext() && inspected < limit) {
+                 inspected++
+-                val id = it.getLong(0)
+-                val displayName = it.getString(1) ?: continue
+-                val mimeType = it.getString(2)
+-                val createdAt = it.getLong(3) * 1000L
+-                val path = it.getString(4).orEmpty()
+-                if (!looksLikeWhatsAppPath(path)) continue
