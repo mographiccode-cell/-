@@ -1,0 +1,251 @@
++      if (!folderAllowed && mounted) folderAllowed = await _ensureWhatsAppFolderAccess(context, optional: true);
++      if (!mediaAllowed && !folderAllowed) return;
++      final report = await NativeBridge.syncWhatsAppMedia(limitPerKind: 800, maxFolderFiles: 6000);
+       await _load();
+       widget.onChanged();
+-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت المزامنة. تمت إضافة $count ملف جديد.')));
++      if (mounted) {
++        final added = _int(report['totalAdded']);
++        final relinked = _int(report['relinked']);
++        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('اكتملت المزامنة: $added ملف جديد، وربط $relinked ملف بمحادثاته.')));
++      }
+     } finally {
+       if (mounted) setState(() => _syncing = false);
+     }
+@@ -2285,7 +2781,7 @@
+                           childAspectRatio: .82,
+                         ),
+                         itemCount: items.length,
+-                        itemBuilder: (_, index) => _MediaTile(item: items[index]),
++                        itemBuilder: (_, index) => _MediaTile(item: items[index], onChanged: _load),
+                       ),
+                     ),
+         ),
+@@ -2295,8 +2791,14 @@
+ }
+ 
+ class _MediaTile extends StatelessWidget {
+-  const _MediaTile({required this.item});
++  const _MediaTile({required this.item, this.onChanged});
+   final ArchivedMedia item;
++  final Future<void> Function()? onChanged;
++
++  Future<void> _assign(BuildContext context) async {
++    final changed = await _showAssignMediaSheet(context, item);
++    if (changed && onChanged != null) await onChanged!();
++  }
+ 
+   @override
+   Widget build(BuildContext context) {
+@@ -2313,21 +2815,37 @@
+           NativeBridge.openMedia(item.localPath, item.mimeType);
+         }
+       },
++      onLongPress: item.isLinked ? null : () => _assign(context),
+       borderRadius: BorderRadius.circular(14),
+       child: Container(
+-        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(14), border: Border.all(color: const Color(0xFF183B47))),
++        decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(14), border: Border.all(color: item.isLinked ? const Color(0xFF183B47) : const Color(0xFF725B22))),
+         clipBehavior: Clip.antiAlias,
+         child: Stack(
+           fit: StackFit.expand,
+           children: [
+             content,
++            if (!item.isLinked)
++              PositionedDirectional(
++                top: 4,
++                end: 4,
++                child: Material(
++                  color: Colors.black.withValues(alpha: .58),
++                  borderRadius: BorderRadius.circular(20),
++                  child: IconButton(
++                    visualDensity: VisualDensity.compact,
++                    tooltip: 'ربط بمحادثة',
++                    onPressed: () => _assign(context),
++                    icon: const Icon(Icons.link_rounded, size: 18, color: Color(0xFFFFC861)),
++                  ),
++                ),
++              ),
+             Align(
+               alignment: Alignment.bottomCenter,
+               child: Container(
+                 width: double.infinity,
+                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+                 color: Colors.black.withValues(alpha: .65),
+-                child: Text(item.conversationTitle.isEmpty ? _typeTitleFromMime(item.mimeType) : item.conversationTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 9.5)),
++                child: Text(item.conversationTitle.isEmpty ? 'غير مرتبطة • اضغط مطولًا للربط' : item.conversationTitle, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 9.5, color: item.isLinked ? Colors.white : const Color(0xFFFFC861))),
+               ),
+             ),
+           ],
+@@ -2337,10 +2855,87 @@
+   }
+ 
+   Widget _mediaIcon() => Center(
+-        child: Icon(item.isVideo ? Icons.play_circle_fill_rounded : item.isAudio ? Icons.graphic_eq_rounded : Icons.insert_drive_file_rounded, color: _accent, size: 38),
++        child: Icon(item.isVideo ? Icons.play_circle_fill_rounded : item.isAudio ? Icons.graphic_eq_rounded : item.fileName.toLowerCase().endsWith('.pdf') ? Icons.picture_as_pdf_rounded : Icons.insert_drive_file_rounded, color: _accent, size: 38),
+       );
+ }
+ 
++Future<bool> _showAssignMediaSheet(BuildContext context, ArchivedMedia item) async {
++  final values = await Future.wait<List<Conversation>>([
++    NativeBridge.getConversations(),
++    NativeBridge.getConversations(archivedOnly: true),
++  ]);
++  final conversations = <Conversation>[...values[0], ...values[1]];
++  if (!context.mounted) return false;
++  if (conversations.isEmpty) {
++    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('لا توجد محادثات محفوظة لربط الملف بها.')));
++    return false;
++  }
++  final search = TextEditingController();
++  final selected = await showModalBottomSheet<Conversation>(
++    context: context,
++    isScrollControlled: true,
++    backgroundColor: _panel,
++    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(26))),
++    builder: (sheetContext) => StatefulBuilder(
++      builder: (sheetContext, setSheetState) {
++        final query = search.text.trim().toLowerCase();
++        final filtered = query.isEmpty
++            ? conversations
++            : conversations.where((c) => c.title.toLowerCase().contains(query) || (c.contactPhone?.contains(query) ?? false)).toList();
++        return Directionality(
++          textDirection: TextDirection.rtl,
++          child: SafeArea(
++            child: Padding(
++              padding: EdgeInsets.fromLTRB(14, 12, 14, MediaQuery.viewInsetsOf(sheetContext).bottom + 14),
++              child: SizedBox(
++                height: MediaQuery.sizeOf(sheetContext).height * .70,
++                child: Column(
++                  children: [
++                    Container(width: 44, height: 4, decoration: BoxDecoration(color: _muted.withValues(alpha: .35), borderRadius: BorderRadius.circular(20))),
++                    const SizedBox(height: 12),
++                    const Text('ربط الملف بمحادثة', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
++                    const SizedBox(height: 4),
++                    Text(item.fileName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: _muted, fontSize: 11)),
++                    const SizedBox(height: 12),
++                    TextField(
++                      controller: search,
++                      onChanged: (_) => setSheetState(() {}),
++                      decoration: const InputDecoration(prefixIcon: Icon(Icons.search_rounded), hintText: 'ابحث عن شخص أو قروب...'),
++                    ),
++                    const SizedBox(height: 10),
++                    Expanded(
++                      child: ListView.separated(
++                        itemCount: filtered.length,
++                        separatorBuilder: (_, _) => const Divider(),
++                        itemBuilder: (_, index) {
++                          final c = filtered[index];
++                          return ListTile(
++                            leading: CircleAvatar(backgroundColor: _panel2, child: Icon(c.isGroup ? Icons.groups_rounded : Icons.person_rounded, color: _accent)),
++                            title: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
++                            subtitle: Text(c.isGroup ? 'قروب • ${c.messageCount} رسالة' : c.contactPhone ?? '${c.messageCount} رسالة', maxLines: 1, overflow: TextOverflow.ellipsis),
++                            onTap: () => Navigator.pop(sheetContext, c),
++                          );
++                        },
++                      ),
++                    ),
++                  ],
++                ),
++              ),
++            ),
++          ),
++        );
++      },
++    ),
++  );
++  search.dispose();
++  if (selected == null) return false;
++  final ok = await NativeBridge.assignMediaToConversation(item.id, selected.key);
++  if (context.mounted) {
++    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok ? 'تم ربط الملف بمحادثة ${selected.title}.' : 'تعذر ربط الملف بالمحادثة.')));
++  }
++  return ok;
++}
++
+ class AnalyticsPage extends StatefulWidget {
+   const AnalyticsPage({super.key});
+ 
+@@ -2508,6 +3103,26 @@
+ 
+ class _SettingsPageState extends State<SettingsPage> {
+   bool _working = false;
++  bool _folderAccess = false;
++  int _folderCount = 0;
++
++  @override
++  void initState() {
++    super.initState();
++    _refreshFolderStatus();
++  }
++
++  Future<void> _refreshFolderStatus() async {
++    final values = await Future.wait<dynamic>([
++      NativeBridge.hasWhatsAppMediaFolderAccess(),
++      NativeBridge.whatsAppMediaFolderCount(),
++    ]);
++    if (!mounted) return;
++    setState(() {
++      _folderAccess = values[0] as bool;
++      _folderCount = values[1] as int;
++    });
++  }
+ 
+   Future<void> _openGeminiSettings() async {
+     await showModalBottomSheet<void>(
+@@ -2669,6 +3284,34 @@
+         ),
+         const SizedBox(height: 9),
+         _SettingCard(
++          icon: Icons.folder_copy_outlined,
++          title: 'مجلد WhatsApp Media',
++          subtitle: _folderAccess
++              ? 'مرتبط ($_folderCount) — يسمح بقراءة PDF والمستندات وVoice Notes من المجلدات التي اخترتها فقط.'
++              : 'اربط مجلد WhatsApp/Media مرة واحدة للوصول إلى PDF والمستندات وVoice Notes بالطريقة الرسمية عبر Android.',
++          status: _folderAccess,
++          action: _folderAccess ? 'ربط مجلد آخر' : 'اختيار المجلد',
++          onTap: _working
++              ? null
++              : () async {
++                  setState(() => _working = true);
++                  try {
++                    await _ensureWhatsAppFolderAccess(context, optional: false);
++                    await _refreshFolderStatus();
++                    if (_folderAccess) {
++                      final report = await NativeBridge.syncWhatsAppMedia(limitPerKind: 600, maxFolderFiles: 6000);
++                      if (context.mounted) {
++                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت إضافة ${_int(report['totalAdded'])} ملف وربط ${_int(report['relinked'])} ملف بمحادثاته.')));
++                      }
++                      await widget.onChanged();
++                    }
++                  } finally {
++                    if (mounted) setState(() => _working = false);
++                  }
++                },
++        ),
++        const SizedBox(height: 9),
++        _SettingCard(
+           icon: Icons.contacts_outlined,
+           title: 'جهات الاتصال والأرقام',
+           subtitle: widget.contactsAccess
+@@ -2757,7 +3400,7 @@
+           label: const Text('حذف كل بيانات ChatVault المحلية', style: TextStyle(color: Color(0xFFFF6577))),
+         ),
+         const SizedBox(height: 14),
+-        const Center(child: Text('ChatVault Next 5.2.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
++        const Center(child: Text('ChatVault Next 5.3.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
+       ],
+     );
+   }
+diff -ruN '--exclude=.dart_tool' '--exclude=.idea' '--exclude=*.orig' '--exclude=pubspec.lock' source_v52/pubspec.yaml source_v53/pubspec.yaml
+--- source_v52/pubspec.yaml	2026-09-01 17:50:01.000000000 +0000
++++ source_v53/pubspec.yaml	2026-09-01 18:00:07.258031106 +0000
+@@ -1,7 +1,7 @@
+ name: chatvault
+ description: Local WhatsApp notification archive with optional Gemini multimodal analysis.
+ publish_to: "none"
+-version: 5.2.0+4
++version: 5.3.0+5
+ 
+ environment:
+   sdk: ">=3.8.0 <4.0.0"
