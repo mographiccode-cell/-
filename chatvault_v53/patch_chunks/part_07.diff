@@ -1,0 +1,341 @@
+                         icon: searchQuery.isEmpty ? Icons.mark_chat_unread_outlined : Icons.search_off_rounded,
+                         title: searchQuery.isEmpty ? 'لا توجد رسائل' : 'لا توجد نتائج',
+@@ -1653,7 +1829,8 @@
+                         },
+                       ),
+           ),
+-          SafeArea(
++          if (!_showingMedia)
++            SafeArea(
+             top: false,
+             child: Container(
+               padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+@@ -1698,6 +1875,318 @@
+   }
+ }
+ 
++class _ChatSectionSelector extends StatelessWidget {
++  const _ChatSectionSelector({
++    required this.showingMedia,
++    required this.mediaCount,
++    required this.onMessages,
++    required this.onMedia,
++  });
++
++  final bool showingMedia;
++  final int mediaCount;
++  final VoidCallback onMessages;
++  final VoidCallback onMedia;
++
++  @override
++  Widget build(BuildContext context) => Container(
++        margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
++        padding: const EdgeInsets.all(4),
++        decoration: BoxDecoration(
++          color: _panel,
++          borderRadius: BorderRadius.circular(16),
++          border: Border.all(color: const Color(0xFF183B47)),
++        ),
++        child: Row(
++          children: [
++            Expanded(
++              child: _ChatSectionButton(
++                selected: !showingMedia,
++                icon: Icons.chat_bubble_outline_rounded,
++                label: 'الرسائل',
++                onTap: onMessages,
++              ),
++            ),
++            const SizedBox(width: 5),
++            Expanded(
++              child: _ChatSectionButton(
++                selected: showingMedia,
++                icon: Icons.perm_media_outlined,
++                label: mediaCount > 0 ? 'الوسائط ($mediaCount)' : 'الوسائط',
++                onTap: onMedia,
++              ),
++            ),
++          ],
++        ),
++      );
++}
++
++class _ChatSectionButton extends StatelessWidget {
++  const _ChatSectionButton({required this.selected, required this.icon, required this.label, required this.onTap});
++  final bool selected;
++  final IconData icon;
++  final String label;
++  final VoidCallback onTap;
++
++  @override
++  Widget build(BuildContext context) => InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(12),
++        child: AnimatedContainer(
++          duration: const Duration(milliseconds: 160),
++          padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 8),
++          decoration: BoxDecoration(
++            color: selected ? _accent.withValues(alpha: .14) : Colors.transparent,
++            borderRadius: BorderRadius.circular(12),
++          ),
++          child: Row(
++            mainAxisAlignment: MainAxisAlignment.center,
++            children: [
++              Icon(icon, size: 18, color: selected ? _accent : _muted),
++              const SizedBox(width: 7),
++              Flexible(child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(color: selected ? _accent : _muted, fontWeight: FontWeight.w800, fontSize: 11.5))),
++            ],
++          ),
++        ),
++      );
++}
++
++class _ConversationMediaPane extends StatelessWidget {
++  const _ConversationMediaPane({
++    required this.items,
++    required this.filter,
++    required this.syncing,
++    required this.onFilterChanged,
++    required this.onSync,
++  });
++
++  final List<ArchivedMedia>? items;
++  final String filter;
++  final bool syncing;
++  final ValueChanged<String> onFilterChanged;
++  final Future<void> Function() onSync;
++
++  @override
++  Widget build(BuildContext context) {
++    final all = items;
++    final filtered = all == null
++        ? <ArchivedMedia>[]
++        : all.where((item) {
++            return switch (filter) {
++              'image' => item.isImage,
++              'video' => item.isVideo,
++              'audio' => item.isAudio,
++              'document' => item.isDocument,
++              _ => true,
++            };
++          }).toList();
++    return Column(
++      children: [
++        Padding(
++          padding: const EdgeInsets.fromLTRB(12, 2, 12, 8),
++          child: Row(
++            children: [
++              Expanded(
++                child: SingleChildScrollView(
++                  scrollDirection: Axis.horizontal,
++                  child: Row(
++                    children: [
++                      _MediaFilterChip(value: 'all', label: 'الكل', icon: Icons.apps_rounded, selected: filter == 'all', onSelected: onFilterChanged),
++                      _MediaFilterChip(value: 'image', label: 'الصور', icon: Icons.image_outlined, selected: filter == 'image', onSelected: onFilterChanged),
++                      _MediaFilterChip(value: 'video', label: 'الفيديو', icon: Icons.videocam_outlined, selected: filter == 'video', onSelected: onFilterChanged),
++                      _MediaFilterChip(value: 'audio', label: 'الصوت', icon: Icons.graphic_eq_rounded, selected: filter == 'audio', onSelected: onFilterChanged),
++                      _MediaFilterChip(value: 'document', label: 'المستندات', icon: Icons.description_outlined, selected: filter == 'document', onSelected: onFilterChanged),
++                    ],
++                  ),
++                ),
++              ),
++              const SizedBox(width: 8),
++              IconButton.filledTonal(
++                onPressed: syncing ? null : onSync,
++                tooltip: 'مزامنة WhatsApp Media',
++                icon: syncing
++                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
++                    : const Icon(Icons.sync_rounded),
++              ),
++            ],
++          ),
++        ),
++        Expanded(
++          child: all == null
++              ? const Center(child: CircularProgressIndicator())
++              : filtered.isEmpty
++                  ? _EmptyState(
++                      icon: filter == 'document' ? Icons.picture_as_pdf_outlined : Icons.photo_library_outlined,
++                      title: filter == 'all' ? 'لا توجد وسائط مرتبطة بهذه المحادثة' : 'لا توجد ملفات من هذا النوع',
++                      subtitle: 'اضغط زر المزامنة. للـPDF وVoice Notes والمستندات اختر مجلد WhatsApp/Media مرة واحدة عند الطلب.',
++                    )
++                  : RefreshIndicator(
++                      onRefresh: onSync,
++                      child: GridView.builder(
++                        physics: const AlwaysScrollableScrollPhysics(),
++                        padding: const EdgeInsets.fromLTRB(12, 4, 12, 22),
++                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
++                          crossAxisCount: 2,
++                          mainAxisSpacing: 10,
++                          crossAxisSpacing: 10,
++                          childAspectRatio: .92,
++                        ),
++                        itemCount: filtered.length,
++                        itemBuilder: (_, index) => _ConversationMediaCard(item: filtered[index]),
++                      ),
++                    ),
++        ),
++      ],
++    );
++  }
++}
++
++class _MediaFilterChip extends StatelessWidget {
++  const _MediaFilterChip({required this.value, required this.label, required this.icon, required this.selected, required this.onSelected});
++  final String value;
++  final String label;
++  final IconData icon;
++  final bool selected;
++  final ValueChanged<String> onSelected;
++
++  @override
++  Widget build(BuildContext context) => Padding(
++        padding: const EdgeInsetsDirectional.only(end: 6),
++        child: FilterChip(
++          selected: selected,
++          onSelected: (_) => onSelected(value),
++          avatar: Icon(icon, size: 16, color: selected ? _accent : _muted),
++          label: Text(label),
++          visualDensity: VisualDensity.compact,
++          selectedColor: _accent.withValues(alpha: .12),
++          side: BorderSide(color: selected ? _accent.withValues(alpha: .55) : const Color(0xFF183B47)),
++        ),
++      );
++}
++
++class _ConversationMediaCard extends StatelessWidget {
++  const _ConversationMediaCard({required this.item});
++  final ArchivedMedia item;
++
++  Future<void> _open(BuildContext context) async {
++    if (item.isImage) {
++      await Navigator.push(context, MaterialPageRoute<void>(builder: (_) => Directionality(textDirection: TextDirection.rtl, child: ImageViewer(path: item.localPath, title: item.fileName))));
++      return;
++    }
++    if (item.isAudio) {
++      if (context.mounted) await _showAudioPlayer(context, item.localPath, item.fileName);
++      return;
++    }
++    await NativeBridge.openMedia(item.localPath, item.mimeType);
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final icon = item.isVideo
++        ? Icons.play_circle_fill_rounded
++        : item.isAudio
++            ? Icons.graphic_eq_rounded
++            : item.isDocument
++                ? (item.fileName.toLowerCase().endsWith('.pdf') ? Icons.picture_as_pdf_rounded : Icons.description_rounded)
++                : Icons.image_rounded;
++    return InkWell(
++      onTap: () => _open(context),
++      borderRadius: BorderRadius.circular(17),
++      child: Container(
++        decoration: BoxDecoration(
++          color: _panel,
++          borderRadius: BorderRadius.circular(17),
++          border: Border.all(color: const Color(0xFF183B47)),
++        ),
++        clipBehavior: Clip.antiAlias,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Expanded(
++              child: Stack(
++                fit: StackFit.expand,
++                children: [
++                  if (item.isImage)
++                    Image.file(
++                      File(item.localPath),
++                      fit: BoxFit.cover,
++                      errorBuilder: (_, _, _) => _ConversationMediaIcon(icon: icon),
++                    )
++                  else
++                    _ConversationMediaIcon(icon: icon),
++                  if (item.isVideo)
++                    const Center(child: Icon(Icons.play_circle_fill_rounded, size: 46, color: Colors.white)),
++                  PositionedDirectional(
++                    top: 7,
++                    end: 7,
++                    child: Container(
++                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
++                      decoration: BoxDecoration(color: Colors.black.withValues(alpha: .60), borderRadius: BorderRadius.circular(12)),
++                      child: Row(
++                        mainAxisSize: MainAxisSize.min,
++                        children: [
++                          Icon(icon, size: 12, color: _accent),
++                          const SizedBox(width: 4),
++                          Text(_mediaKindLabel(item), style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w800)),
++                        ],
++                      ),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++            Padding(
++              padding: const EdgeInsets.fromLTRB(9, 7, 9, 9),
++              child: Column(
++                crossAxisAlignment: CrossAxisAlignment.start,
++                children: [
++                  Text(item.fileName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w750, fontSize: 11.5)),
++                  const SizedBox(height: 3),
++                  Row(
++                    children: [
++                      Expanded(child: Text('${_date(item.displayTime)} • ${_time(item.displayTime)}', style: const TextStyle(color: _muted, fontSize: 9.5))),
++                      if (item.fileSize > 0) Text(_fileSizeLabel(item.fileSize), style: const TextStyle(color: _muted, fontSize: 9.5), textDirection: TextDirection.ltr),
++                    ],
++                  ),
++                ],
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
++
++class _ConversationMediaIcon extends StatelessWidget {
++  const _ConversationMediaIcon({required this.icon});
++  final IconData icon;
++
++  @override
++  Widget build(BuildContext context) => Container(
++        color: _panel2,
++        child: Center(child: Icon(icon, color: _accent, size: 44)),
++      );
++}
++
++String _mediaKindLabel(ArchivedMedia item) {
++  if (item.isImage) return 'صورة';
++  if (item.isVideo) return 'فيديو';
++  if (item.isAudio) return 'صوت';
++  if (item.fileName.toLowerCase().endsWith('.pdf')) return 'PDF';
++  return 'ملف';
++}
++
++String _fileSizeLabel(int bytes) {
++  if (bytes < 1024) return '$bytes B';
++  final kb = bytes / 1024;
++  if (kb < 1024) return '${kb.toStringAsFixed(kb >= 100 ? 0 : 1)} KB';
++  final mb = kb / 1024;
++  if (mb < 1024) return '${mb.toStringAsFixed(mb >= 100 ? 0 : 1)} MB';
++  final gb = mb / 1024;
++  return '${gb.toStringAsFixed(2)} GB';
++}
++
+ class _DaySeparator extends StatelessWidget {
+   const _DaySeparator({required this.milliseconds});
+   final int milliseconds;
+@@ -2240,12 +2729,19 @@
+     if (_syncing) return;
+     setState(() => _syncing = true);
+     try {
+-      final allowed = await _ensureMediaAccess(context);
+-      if (!allowed) return;
+-      final count = await NativeBridge.syncMedia();
++      var mediaAllowed = await NativeBridge.hasMediaPermissions();
++      if (!mediaAllowed && mounted) mediaAllowed = await _ensureMediaAccess(context);
++      var folderAllowed = await NativeBridge.hasWhatsAppMediaFolderAccess();
