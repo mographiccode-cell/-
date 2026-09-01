@@ -1,0 +1,176 @@
+name: Build ChatVault Next v5.3.0 Media Linking
+
+on:
+  push:
+    branches:
+      - build-chatvault-next-v53-20260901
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.7'
+          channel: stable
+          cache: true
+
+      - name: Reconstruct exact v5.2 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v31/chunks/payload_* > /tmp/v31.b64
+          test "$(wc -c < /tmp/v31.b64)" -eq 55880
+          base64 -d /tmp/v31.b64 > /tmp/v31.zip
+          echo 'ca114021fadbdaac60762f200e7bfc3a5f1899a81bfd8f4ccee9c9cbfe055ce5  /tmp/v31.zip' | sha256sum -c -
+          unzip -t /tmp/v31.zip >/dev/null
+
+          rm -rf chatvault_next53/project
+          mkdir -p chatvault_next53/project
+          cd chatvault_next53/project
+          flutter create --platforms=android --org com.mographiccode --project-name chatvault .
+          unzip -qo /tmp/v31.zip -d .
+
+          patch -p1 < ../../chatvault_v40/patch_db.diff
+          patch -p1 < ../../chatvault_v40/patch_activity.diff
+          patch -p1 < ../../chatvault_v40/patch_ui.diff
+          patch -p1 < ../../chatvault_v40/patch_pubspec.diff
+
+          patch -p1 < ../../chatvault_v41/patch_db.diff
+          patch -p1 < ../../chatvault_v41/patch_activity.diff
+          patch -p1 < ../../chatvault_v41/patch_ui.diff
+          patch -p1 < ../../chatvault_v41/patch_manifest.diff
+          patch -p1 < ../../chatvault_v41/patch_pubspec.diff
+
+          cat ../../chatvault_v51/ui_parts/part_* > /tmp/v51_ui.diff
+          cat ../../chatvault_v51/gemini_parts/part_* > android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          patch -p1 < ../../chatvault_v51/patch_activity.diff
+          patch -p1 < /tmp/v51_ui.diff
+          patch -p1 < ../../chatvault_v51/patch_manifest.diff
+          patch -p1 < ../../chatvault_v51/patch_pubspec.diff
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          s = s.replace('if (!mounted || matches.isEmpty) return;', 'if (!context.mounted || matches.isEmpty) return;')
+          s = s.replace(
+              "Flexible(child: SingleChildScrollView(child: SelectionArea(child: Text(report.isEmpty ? 'لم يرجع Gemini تقريرًا نصيًا.' : report, style: const TextStyle(height: 1.55, fontSize: 13)))),",
+              "Flexible(child: SingleChildScrollView(child: SelectionArea(child: Text(report.isEmpty ? 'لم يرجع Gemini تقريرًا نصيًا.' : report, style: const TextStyle(height: 1.55, fontSize: 13))))),",
+          )
+          start = s.find('  Future<void> _requestContacts() async {')
+          end = s.find('  Future<void> _importLegacyRoot()', start)
+          if start >= 0 and end > start:
+              s = s[:start] + s[end:]
+          s = s.replace('DropdownButtonFormField<String>(\n                        value:', 'DropdownButtonFormField<String>(\n                        initialValue:')
+          s = s.replace(
+              "                                Radio<String>(value: id, groupValue: _settings['activeKeyId']?.toString(), onChanged: _working ? null : (v) { if (v != null) _setActive(v); }),",
+              "                                // ignore: deprecated_member_use\n                                Radio<String>(value: id, groupValue: _settings['activeKeyId']?.toString(), onChanged: _working ? null : (v) { if (v != null) _setActive(v); }),",
+          )
+          p.write_text(s)
+
+          g = Path('android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt')
+          gs = g.read_text()
+          gs = gs.replace(
+              '        connection.setRequestProperty("Accept", "application/json")\n',
+              '        connection.setRequestProperty("Accept", "application/json")\n        if (url.contains("/interactions")) connection.setRequestProperty("Api-Revision", "2026-05-20")\n',
+          )
+          g.write_text(gs)
+          PY
+
+          cat ../../chatvault_v52/b64_chunks/chunk_* > /tmp/v52.b64
+          test "$(wc -c < /tmp/v52.b64)" -eq 42068
+          echo '7167bde1157506ebcd5379f05003501cff6a1686e5750446b0ba2a49a65b160b  /tmp/v52.b64' | sha256sum -c -
+          base64 -d /tmp/v52.b64 > /tmp/v52.patch
+          echo '3f097fb59091aa4669b242a77dddba44ab9ccb500c58101a8c928648f566da55  /tmp/v52.patch' | sha256sum -c -
+          patch -p1 < /tmp/v52.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          s = s.replace(
+              "if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت إضافة $count ملف وسائط جديد.')));",
+              "if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت إضافة $count ملف وسائط جديد.')));",
+          )
+          s = s.replace(
+              "if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم تحديث $count سجل.')));",
+              "if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم تحديث $count سجل.')));",
+          )
+          p.write_text(s)
+          PY
+
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
+          sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.next"/' android/app/build.gradle.kts
+          sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
+
+          grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
+          grep -q 'version: 5.2.0+4' pubspec.yaml
+
+      - name: Apply verified v5.3 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat chatvault_v53/patch_chunks/part_* > /tmp/v53.patch
+          test "$(wc -c < /tmp/v53.patch)" -eq 93045
+          echo '78209fa10add5a528ef3a613713f7980b2989abac06f7532d04b19171576be65  /tmp/v53.patch' | sha256sum -c -
+          cd chatvault_next53/project
+          patch -p1 < /tmp/v53.patch
+
+          grep -q 'version: 5.3.0+5' pubspec.yaml
+          grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
+          grep -q 'DATABASE_VERSION = 5' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'conversation_key TEXT' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'link_confidence REAL' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+          grep -q 'assignMediaToConversation' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'pickWhatsAppMediaFolder' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'syncWhatsAppMedia' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'مجلد WhatsApp Media' lib/main.dart
+          grep -q 'ChatVault Next 5.3.0' lib/main.dart
+          ! grep -q 'MANAGE_EXTERNAL_STORAGE' android/app/src/main/AndroidManifest.xml
+          ! grep -q 'BIND_ACCESSIBILITY_SERVICE' android/app/src/main/AndroidManifest.xml
+
+      - name: Get dependencies
+        working-directory: chatvault_next53/project
+        run: flutter pub get
+
+      - name: Static analysis
+        working-directory: chatvault_next53/project
+        run: flutter analyze lib test
+
+      - name: Widget tests
+        working-directory: chatvault_next53/project
+        run: flutter test
+
+      - name: Build unsigned release APK
+        working-directory: chatvault_next53/project
+        run: flutter build apk --release
+
+      - name: Verify APK structure and 16 KB alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='chatvault_next53/project/build/app/outputs/flutter-apk/app-release.apk'
+          test -s "$APK"
+          ZA=$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)
+          "$ZA" -c -P 16 -v 4 "$APK" | tee chatvault_next53/zipalign-verify.txt
+          grep -q 'Verification successful' chatvault_next53/zipalign-verify.txt
+          unzip -t "$APK" >/tmp/v53-unzip.txt
+          cp "$APK" chatvault_next53/ChatVault-Next-v5.3.0-unsigned.apk
+          sha256sum chatvault_next53/ChatVault-Next-v5.3.0-unsigned.apk > chatvault_next53/ChatVault-Next-v5.3.0-unsigned.sha256
+
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatVault-Next-v5.3.0-UNSIGNED
+          path: |
+            chatvault_next53/ChatVault-Next-v5.3.0-unsigned.apk
+            chatvault_next53/ChatVault-Next-v5.3.0-unsigned.sha256
+            chatvault_next53/zipalign-verify.txt
+          if-no-files-found: error
+          retention-days: 7
