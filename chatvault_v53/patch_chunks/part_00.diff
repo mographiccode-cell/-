@@ -1,0 +1,71 @@
+diff -ruN '--exclude=.dart_tool' '--exclude=.idea' '--exclude=*.orig' '--exclude=pubspec.lock' source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+--- source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-09-01 17:50:01.000000000 +0000
++++ source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-09-01 18:00:57.885679854 +0000
+@@ -18,7 +18,7 @@
+ ) {
+     companion object {
+         private const val DATABASE_NAME = "chatvault.db"
+-        private const val DATABASE_VERSION = 4
++        private const val DATABASE_VERSION = 5
+         private const val TABLE_CONVERSATIONS = "conversations"
+         private const val TABLE_MESSAGES = "messages"
+         private const val TABLE_MEDIA = "media_archive"
+@@ -86,6 +86,11 @@
+                 captured_at INTEGER NOT NULL,
+                 source_created_at INTEGER NOT NULL DEFAULT 0,
+                 message_id INTEGER,
++                conversation_key TEXT,
++                media_kind TEXT NOT NULL DEFAULT 'document',
++                link_confidence REAL NOT NULL DEFAULT 0,
++                link_source TEXT NOT NULL DEFAULT 'unlinked',
++                file_size INTEGER NOT NULL DEFAULT 0,
+                 dedupe_hash TEXT NOT NULL UNIQUE
+             )
+             """.trimIndent()
+@@ -117,6 +122,29 @@
+             createImportHistoryTable(db)
+             createIndexes(db)
+         }
++        if (oldVersion < 5) {
++            addColumnIfMissing(db, TABLE_MEDIA, "conversation_key", "TEXT")
++            addColumnIfMissing(db, TABLE_MEDIA, "media_kind", "TEXT NOT NULL DEFAULT 'document'")
++            addColumnIfMissing(db, TABLE_MEDIA, "link_confidence", "REAL NOT NULL DEFAULT 0")
++            addColumnIfMissing(db, TABLE_MEDIA, "link_source", "TEXT NOT NULL DEFAULT 'unlinked'")
++            addColumnIfMissing(db, TABLE_MEDIA, "file_size", "INTEGER NOT NULL DEFAULT 0")
++            db.execSQL(
++                """
++                UPDATE $TABLE_MEDIA
++                   SET conversation_key = COALESCE(conversation_key, (SELECT m.conversation_key FROM $TABLE_MESSAGES m WHERE m.id = $TABLE_MEDIA.message_id)),
++                       media_kind = CASE
++                           WHEN LOWER(COALESCE(mime_type,'')) LIKE 'image/gif%' THEN 'gif'
++                           WHEN LOWER(COALESCE(mime_type,'')) LIKE 'image/%' THEN 'image'
++                           WHEN LOWER(COALESCE(mime_type,'')) LIKE 'video/%' THEN 'video'
++                           WHEN LOWER(COALESCE(mime_type,'')) LIKE 'audio/%' THEN 'audio'
++                           ELSE 'document'
++                       END,
++                       link_confidence = CASE WHEN message_id IS NOT NULL THEN 1.0 ELSE link_confidence END,
++                       link_source = CASE WHEN message_id IS NOT NULL THEN 'message_backfill' ELSE link_source END
++                """.trimIndent()
++            )
++            createIndexes(db)
++        }
+     }
+ 
+     override fun onOpen(db: SQLiteDatabase) {
+@@ -155,6 +183,9 @@
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_sender_phone ON $TABLE_MESSAGES(sender_phone)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_messages_summary ON $TABLE_MESSAGES(is_system_summary)")
+         db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_captured ON $TABLE_MEDIA(captured_at DESC)")
++        db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_conversation ON $TABLE_MEDIA(conversation_key, source_created_at DESC)")
++        db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_message ON $TABLE_MEDIA(message_id)")
++        db.execSQL("CREATE INDEX IF NOT EXISTS idx_media_file ON $TABLE_MEDIA(package_name, file_name, file_size, source_created_at)")
+     }
+ 
+     private fun addColumnIfMissing(db: SQLiteDatabase, table: String, column: String, definition: String) {
+@@ -421,9 +452,22 @@
+         val key = db.rawQuery("SELECT conversation_key FROM $TABLE_MESSAGES WHERE id = ?", arrayOf(messageId.toString())).use {
+             if (it.moveToFirst()) it.getString(0) else null
+         }
++        if (!key.isNullOrBlank()) {
++            db.execSQL(
++                "UPDATE $TABLE_MEDIA SET message_id = ?, conversation_key = ?, link_confidence = MAX(link_confidence, 1.0), link_source = CASE WHEN link_source = 'unlinked' THEN 'message_attach' ELSE link_source END WHERE local_path = ?",
