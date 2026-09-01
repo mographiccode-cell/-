@@ -85,7 +85,7 @@ jobs:
           g.write_text(gs)
           PY
 
-          cat ../../chatvault_v52/patch_parts/part_* > /tmp/v52.patch
+          base64 -d ../../chatvault_v52/v52_patch.b64 > /tmp/v52.patch
           echo '3f097fb59091aa4669b242a77dddba44ab9ccb500c58101a8c928648f566da55  /tmp/v52.patch' | sha256sum -c -
           patch -p1 < /tmp/v52.patch
 
