@@ -1,0 +1,98 @@
+-        val start = createdAt - 180_000L
+-        val end = createdAt + 180_000L
+-        val args = mutableListOf(packageName, start.toString(), end.toString())
+-        val hintClause = if (labels.isNotEmpty()) {
+-            labels.forEach { args.add("%$it%") }
+-            " AND (" + labels.joinToString(" OR ") { "LOWER(body) LIKE LOWER(?)" } + ")"
+-        } else ""
++        val labels = mediaHintLabels(type)
++        val window = 8 * 60_000L
++        val start = (createdAt - window).coerceAtLeast(0L)
++        val end = createdAt + window
++        data class Candidate(
++            val id: Long,
++            val key: String,
++            val postedAt: Long,
++            val messageType: String,
++            val body: String,
++            val direction: String,
++            val score: Double,
++            val delta: Long,
++            val strong: Boolean,
++        )
++
++        val candidates = mutableListOf<Candidate>()
+         readableDatabase.rawQuery(
+             """
+-            SELECT id FROM $TABLE_MESSAGES
++            SELECT id, conversation_key, posted_at, message_type, body, direction
++              FROM $TABLE_MESSAGES
+              WHERE package_name = ?
+                AND posted_at BETWEEN ? AND ?
+                AND is_deletion_signal = 0
+                AND is_system_summary = 0
+                AND media_path IS NULL
+-               $hintClause
+              ORDER BY ABS(posted_at - ?) ASC
+-             LIMIT 1
++             LIMIT 12
+             """.trimIndent(),
+-            (args + createdAt.toString()).toTypedArray(),
+-        ).use { cursor -> return if (cursor.moveToFirst()) cursor.getLong(0) else null }
++            arrayOf(packageName, start.toString(), end.toString(), createdAt.toString()),
++        ).use { cursor ->
++            while (cursor.moveToNext()) {
++                val id = cursor.getLong(0)
++                val key = cursor.getString(1)
++                val postedAt = cursor.getLong(2)
++                val messageType = cursor.getString(3).orEmpty().lowercase()
++                val body = cursor.getString(4).orEmpty().lowercase()
++                val direction = cursor.getString(5).orEmpty().lowercase()
++                val delta = kotlin.math.abs(postedAt - createdAt)
++                val typeMatch = mediaTypesCompatible(type, messageType)
++                val bodyHint = labels.any { label -> body.contains(label.lowercase()) }
++                val strong = typeMatch || bodyHint
++                if (!strong && delta > 90_000L) continue
++
++                var score = when {
++                    typeMatch && bodyHint -> 0.98
++                    typeMatch -> 0.93
++                    bodyHint -> 0.90
++                    else -> 0.80
++                }
++                score -= (delta.toDouble() / window.toDouble()) * 0.28
++                if (preferOutgoing != null) {
++                    val directionMatches = (preferOutgoing && direction == "outgoing") || (!preferOutgoing && direction == "incoming")
++                    score += if (directionMatches) 0.05 else -0.12
++                }
++                if (delta <= 30_000L) score += 0.03
++                candidates += Candidate(id, key, postedAt, messageType, body, direction, score.coerceIn(0.0, 1.0), delta, strong)
++            }
++        }
++        if (candidates.isEmpty()) return null
++        val ranked = candidates.sortedWith(compareByDescending<Candidate> { it.score }.thenBy { it.delta })
++        val best = ranked.first()
++        if (best.score < 0.76) return null
++        val runnerUp = ranked.drop(1).firstOrNull()
++        if (runnerUp != null && runnerUp.key != best.key && (best.score - runnerUp.score) < 0.055 && kotlin.math.abs(best.delta - runnerUp.delta) < 45_000L) {
++            return null
++        }
++        val reason = when {
++            best.messageType == type -> "type_time"
++            best.strong -> "hint_time"
++            else -> "time_only"
++        }
++        return MediaMatch(best.id, best.key, best.score, reason)
++    }
++
++    fun relinkUnassignedMedia(limit: Int = 2000): Int {
++        val rows = readableDatabase.rawQuery(
++            """
++            SELECT id, package_name, mime_type, source_created_at, local_path
++              FROM $TABLE_MEDIA
++             WHERE COALESCE(conversation_key,'') = ''
++             ORDER BY source_created_at DESC
++             LIMIT ${limit.coerceIn(1, 5000)}
++            """.trimIndent(),
++            null,
++        ).use { cursor ->
