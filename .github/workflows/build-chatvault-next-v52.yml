@@ -90,6 +90,7 @@ jobs:
           base64 -d /tmp/v52.b64 > /tmp/v52.patch
           echo '3f097fb59091aa4669b242a77dddba44ab9ccb500c58101a8c928648f566da55  /tmp/v52.patch' | sha256sum -c -
           patch -p1 < /tmp/v52.patch
+          sed -i 's/if (mounted) ScaffoldMessenger.of(context)/if (context.mounted) ScaffoldMessenger.of(context)/g' lib/main.dart
 
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' android/app/build.gradle.kts
           sed -i 's/applicationId = "com.mographiccode.chatvault"/applicationId = "com.mographiccode.chatvault.next"/' android/app/build.gradle.kts
