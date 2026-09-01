@@ -117,6 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           cat chatvault_v53/patch_chunks/part_* > /tmp/v53.patch
+          sed -i 's/^ diff -ruN /diff -ruN /' /tmp/v53.patch
           test "$(wc -c < /tmp/v53.patch)" -eq 93045
           echo '78209fa10add5a528ef3a613713f7980b2989abac06f7532d04b19171576be65  /tmp/v53.patch' | sha256sum -c -
           cd chatvault_next53/project
