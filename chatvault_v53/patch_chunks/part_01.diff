@@ -1,0 +1,95 @@
++                arrayOf<Any?>(messageId, key, mediaPath),
++            )
++        }
+         NativeEventBus.dataChanged(key, "media")
+     }
+ 
++    data class MediaMatch(
++        val messageId: Long,
++        val conversationKey: String,
++        val confidence: Double,
++        val source: String,
++    )
++
+     fun insertMedia(
+         packageName: String,
+         fileName: String,
+@@ -432,8 +476,19 @@
+         localPath: String,
+         sourceCreatedAt: Long,
+         messageId: Long? = null,
++        conversationKey: String? = null,
++        linkConfidence: Double = if (messageId != null && messageId > 0) 1.0 else 0.0,
++        linkSource: String = if (messageId != null && messageId > 0) "message" else "unlinked",
++        fileSize: Long = 0L,
+     ): Long {
+-        val hash = sha256("$packageName|$fileName|$sourceCreatedAt|$localPath")
++        val resolvedConversationKey = conversationKey?.takeIf { it.isNotBlank() } ?: messageId?.takeIf { it > 0 }?.let { id ->
++            readableDatabase.rawQuery(
++                "SELECT conversation_key FROM $TABLE_MESSAGES WHERE id = ? LIMIT 1",
++                arrayOf(id.toString()),
++            ).use { if (it.moveToFirst()) it.getString(0) else null }
++        }
++        val mediaKind = mimeToType(mimeType)
++        val hash = sha256("$packageName|$fileName|$fileSize|$sourceCreatedAt")
+         val values = ContentValues().apply {
+             put("package_name", packageName)
+             put("file_name", fileName)
+@@ -443,48 +498,184 @@
+             put("captured_at", System.currentTimeMillis())
+             put("source_created_at", sourceCreatedAt)
+             if (messageId != null && messageId > 0) put("message_id", messageId)
++            put("conversation_key", resolvedConversationKey)
++            put("media_kind", mediaKind)
++            put("link_confidence", linkConfidence.coerceIn(0.0, 1.0))
++            put("link_source", linkSource)
++            put("file_size", fileSize.coerceAtLeast(0L))
+             put("dedupe_hash", hash)
+         }
+         val id = writableDatabase.insertWithOnConflict(TABLE_MEDIA, null, values, SQLiteDatabase.CONFLICT_IGNORE)
+-        if (id > 0) NativeEventBus.dataChanged(null, "media_archive")
++        if (id > 0) NativeEventBus.dataChanged(resolvedConversationKey, "media_archive")
+         return id
+     }
+ 
+-    fun mediaAlreadyArchived(packageName: String, fileName: String, sourceCreatedAt: Long): Boolean =
+-        readableDatabase.rawQuery(
+-            "SELECT 1 FROM $TABLE_MEDIA WHERE package_name = ? AND file_name = ? AND source_created_at = ? LIMIT 1",
+-            arrayOf(packageName, fileName, sourceCreatedAt.toString()),
++    fun mediaAlreadyArchived(packageName: String, fileName: String, sourceCreatedAt: Long, fileSize: Long = 0L): Boolean {
++        val start = (sourceCreatedAt - 3_000L).coerceAtLeast(0L)
++        val end = sourceCreatedAt + 3_000L
++        val sizeClause = if (fileSize > 0) " AND (file_size = ? OR file_size = 0)" else ""
++        val args = mutableListOf(packageName, fileName, start.toString(), end.toString())
++        if (fileSize > 0) args += fileSize.toString()
++        return readableDatabase.rawQuery(
++            "SELECT 1 FROM $TABLE_MEDIA WHERE package_name = ? AND file_name = ? AND source_created_at BETWEEN ? AND ?$sizeClause LIMIT 1",
++            args.toTypedArray(),
++        ).use { it.moveToFirst() }
++    }
++
++    fun mediaUriAlreadyArchived(originalUri: String?): Boolean {
++        if (originalUri.isNullOrBlank()) return false
++        return readableDatabase.rawQuery(
++            "SELECT 1 FROM $TABLE_MEDIA WHERE original_uri = ? LIMIT 1",
++            arrayOf(originalUri),
+         ).use { it.moveToFirst() }
++    }
+ 
+-    fun findBestMessageForMedia(packageName: String, mimeType: String?, createdAt: Long): Long? {
++    fun findBestMessageForMedia(packageName: String, mimeType: String?, createdAt: Long): Long? =
++        findBestMediaMatch(packageName, mimeType, createdAt, null)?.messageId
++
++    fun findBestMediaMatch(
++        packageName: String,
++        mimeType: String?,
++        createdAt: Long,
++        preferOutgoing: Boolean? = null,
++    ): MediaMatch? {
+         val type = mimeToType(mimeType)
+-        val labels = when (type) {
+-            "image" -> listOf("صورة", "photo", "image", "📷")
+-            "video" -> listOf("فيديو", "video", "🎥")
+-            "audio" -> listOf("صوت", "audio", "voice", "تسجيل")
+-            else -> emptyList()
+-        }
