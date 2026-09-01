@@ -64,6 +64,34 @@ jobs:
           sed -i '/signingConfig = signingConfigs.getByName("debug")/d' android/app/build.gradle.kts
           sed -i 's/if (!mounted || matches.isEmpty) return;/if (!context.mounted || matches.isEmpty) return;/' lib/main.dart
 
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          s = s.replace(
+              "Flexible(child: SingleChildScrollView(child: SelectionArea(child: Text(report.isEmpty ? 'لم يرجع Gemini تقريرًا نصيًا.' : report, style: const TextStyle(height: 1.55, fontSize: 13)))),",
+              "Flexible(child: SingleChildScrollView(child: SelectionArea(child: Text(report.isEmpty ? 'لم يرجع Gemini تقريرًا نصيًا.' : report, style: const TextStyle(height: 1.55, fontSize: 13))))),",
+          )
+          start = s.find('  Future<void> _requestContacts() async {')
+          end = s.find('  Future<void> _importLegacyRoot()', start)
+          if start >= 0 and end > start:
+              s = s[:start] + s[end:]
+          s = s.replace('DropdownButtonFormField<String>(\n                        value:', 'DropdownButtonFormField<String>(\n                        initialValue:')
+          s = s.replace(
+              "                                Radio<String>(value: id, groupValue: _settings['activeKeyId']?.toString(), onChanged: _working ? null : (v) { if (v != null) _setActive(v); }),",
+              "                                // ignore: deprecated_member_use\n                                Radio<String>(value: id, groupValue: _settings['activeKeyId']?.toString(), onChanged: _working ? null : (v) { if (v != null) _setActive(v); }),",
+          )
+          p.write_text(s)
+
+          g = Path('android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt')
+          gs = g.read_text()
+          gs = gs.replace(
+              '        connection.setRequestProperty("Accept", "application/json")\n',
+              '        connection.setRequestProperty("Accept", "application/json")\n        if (url.contains("/interactions")) connection.setRequestProperty("Api-Revision", "2026-05-20")\n',
+          )
+          g.write_text(gs)
+          PY
+
           grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
           grep -q 'version: 5.1.0+3' pubspec.yaml
           grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
@@ -73,6 +101,7 @@ jobs:
           grep -q 'class GeminiManager' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
           grep -q 'AndroidKeyStore' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
           grep -q '/v1beta/interactions' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
+          grep -q 'Api-Revision' android/app/src/main/kotlin/com/mographiccode/chatvault/GeminiManager.kt
           grep -q 'geminiAnalyzeConversation' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'startVoicePrompt' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'تحليل المحادثة بـ Gemini' lib/main.dart
