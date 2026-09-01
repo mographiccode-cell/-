@@ -123,6 +123,22 @@ jobs:
           cd chatvault_next53/project
           patch -p1 < /tmp/v53.patch
 
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('lib/main.dart')
+          s = p.read_text()
+          s = s.replace('FontWeight.w750', 'FontWeight.w700')
+          start = s.find('String _typeTitleFromMime(String? mime) {')
+          if start >= 0:
+              end = s.find('\n}', start)
+              if end >= 0:
+                  end += 2
+                  while end < len(s) and s[end] == '\n':
+                      end += 1
+                  s = s[:start] + s[end:]
+          p.write_text(s)
+          PY
+
           grep -q 'version: 5.3.0+5' pubspec.yaml
           grep -q 'applicationId = "com.mographiccode.chatvault.next"' android/app/build.gradle.kts
           grep -q 'DATABASE_VERSION = 5' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
