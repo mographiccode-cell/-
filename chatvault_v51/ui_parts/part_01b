@@ -1,0 +1,5 @@
++                      const Text('نطاق التحليل', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
++                      const SizedBox(height: 7),
++                      Wrap(
++                        spacing: 7,
++                        children: [
