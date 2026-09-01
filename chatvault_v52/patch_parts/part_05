@@ -1,0 +1,41 @@
+hild: Text('ChatVault Next 5.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
++        const Center(child: Text('ChatVault Next 5.2.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
+       ],
+     );
+   }
+@@ -2823,6 +3030,23 @@
+       );
+ }
+ 
++bool _sameDay(int a, int b) {
++  final first = DateTime.fromMillisecondsSinceEpoch(a);
++  final second = DateTime.fromMillisecondsSinceEpoch(b);
++  return first.year == second.year && first.month == second.month && first.day == second.day;
++}
++
++String _dayLabel(int milliseconds) {
++  final value = DateTime.fromMillisecondsSinceEpoch(milliseconds);
++  final now = DateTime.now();
++  final today = DateTime(now.year, now.month, now.day);
++  final date = DateTime(value.year, value.month, value.day);
++  final delta = today.difference(date).inDays;
++  if (delta == 0) return 'اليوم';
++  if (delta == 1) return 'أمس';
++  return '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')}/${value.year}';
++}
++
+ String _time(int milliseconds) {
+   if (milliseconds <= 0) return '--:--';
+   final d = DateTime.fromMillisecondsSinceEpoch(milliseconds);
+diff -ruN orig_v51/pubspec.yaml src/pubspec.yaml
+--- orig_v51/pubspec.yaml	2026-08-31 23:51:57.000000000 +0000
++++ src/pubspec.yaml	2026-09-01 15:42:34.888145235 +0000
+@@ -1,7 +1,7 @@
+ name: chatvault
+ description: Local WhatsApp notification archive with optional Gemini multimodal analysis.
+ publish_to: "none"
+-version: 5.1.0+3
++version: 5.2.0+4
+ 
+ environment:
+   sdk: ">=3.8.0 <4.0.0"

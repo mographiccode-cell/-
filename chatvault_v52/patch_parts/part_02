@@ -1,0 +1,114 @@
+Vault already stores the local reply when it is sent, so
++            // ignore this notification echo instead of creating a second copy (or treating
++            // it as an incoming message on WhatsApp builds that omit sender metadata).
++            if (ReplyRegistry.isRecentLocalReplyEcho(conversationKey, body, postedAt)) return@forEach
+             val id = db.insertMessage(
+                 conversationKey = conversationKey,
+                 packageName = sbn.packageName,
+@@ -178,6 +183,10 @@
+                 val sender = if (isGroup) firstMeaningful(fallbackContact.displayName, rawFallbackSender, fallbackContact.phoneNumber) else firstMeaningful(contactInfo.displayName, fallbackContact.displayName, rawFallbackSender, conversationTitle)
+                 val body = fallback.second
+                 if (body.isNotBlank() && !looksLikeSystemSummary(body)) {
++                    // Some WhatsApp versions echo a Direct Reply through EXTRA_TEXT rather
++                    // than MessagingStyle. Suppress that echo too; the outgoing message was
++                    // already persisted by MainActivity.sendReply.
++                    if (ReplyRegistry.isRecentLocalReplyEcho(conversationKey, body, sbn.postTime)) return
+                     db.insertMessage(
+                         conversationKey = conversationKey,
+                         packageName = sbn.packageName,
+diff -ruN orig_v51/lib/main.dart src/lib/main.dart
+--- orig_v51/lib/main.dart	2026-09-01 15:43:52.998558878 +0000
++++ src/lib/main.dart	2026-09-01 15:43:35.199671691 +0000
+@@ -55,6 +55,20 @@
+           elevation: 0,
+           margin: EdgeInsets.zero,
+         ),
++        dividerTheme: const DividerThemeData(color: Color(0xFF183B47), thickness: .7, space: 1),
++        snackBarTheme: SnackBarThemeData(
++          backgroundColor: _panel2,
++          contentTextStyle: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
++          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
++          behavior: SnackBarBehavior.floating,
++        ),
++        bottomSheetTheme: const BottomSheetThemeData(backgroundColor: _panel, surfaceTintColor: Colors.transparent),
++        filledButtonTheme: FilledButtonThemeData(
++          style: FilledButton.styleFrom(
++            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
++            textStyle: const TextStyle(fontWeight: FontWeight.w800),
++          ),
++        ),
+         inputDecorationTheme: InputDecorationTheme(
+           filled: true,
+           fillColor: _panel,
+@@ -98,6 +112,9 @@
+   static Future<void> openNotificationAccessSettings() async =>
+       _channel.invokeMethod<void>('openNotificationAccessSettings');
+ 
++  static Future<void> openAppSettings() async =>
++      _channel.invokeMethod<void>('openAppSettings');
++
+   static Future<bool> hasMediaPermissions() async =>
+       await _channel.invokeMethod<bool>('hasMediaPermissions') ?? false;
+ 
+@@ -603,6 +620,70 @@
+   return text == null || text.isEmpty || text == 'null' ? null : text;
+ }
+ 
++Future<bool> _ensureMediaAccess(BuildContext context) async {
++  if (await NativeBridge.hasMediaPermissions()) return true;
++  if (!context.mounted) return false;
++  final approved = await showDialog<bool>(
++    context: context,
++    builder: (dialogContext) => AlertDialog(
++      icon: const Icon(Icons.perm_media_rounded, color: _accent, size: 34),
++      title: const Text('السماح بالوصول إلى الوسائط؟'),
++      content: const Text(
++        'يحتاج ChatVault إلى صلاحية الصور والفيديو والصوت فقط لكي يتمكن من العثور على وسائط WhatsApp الموجودة على جهازك ونسخها إلى أرشيفه المحلي. لا تُستخدم الصلاحية لرفع الملفات في الخلفية.',
++        style: TextStyle(height: 1.55),
++      ),
++      actions: [
++        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('ليس الآن')),
++        FilledButton.icon(
++          onPressed: () => Navigator.pop(dialogContext, true),
++          icon: const Icon(Icons.lock_open_rounded),
++          label: const Text('متابعة'),
++        ),
++      ],
++    ),
++  );
++  if (approved != true) return false;
++  final allowed = await NativeBridge.requestMediaPermissions();
++  if (allowed || !context.mounted) return allowed;
++  ScaffoldMessenger.of(context).showSnackBar(
++    SnackBar(
++      content: const Text('لم يتم منح كل صلاحيات الوسائط. يمكنك تفعيلها من إعدادات التطبيق.'),
++      action: SnackBarAction(label: 'الإعدادات', onPressed: NativeBridge.openAppSettings),
++    ),
++  );
++  return false;
++}
++
++Future<bool> _ensureContactsAccess(BuildContext context) async {
++  if (await NativeBridge.hasContactsPermission()) return true;
++  if (!context.mounted) return false;
++  final approved = await showDialog<bool>(
++    context: context,
++    builder: (dialogContext) => AlertDialog(
++      icon: const Icon(Icons.contacts_rounded, color: _accent, size: 34),
++      title: const Text('مطابقة الأسماء والأرقام'),
++      content: const Text(
++        'صلاحية جهات الاتصال اختيارية. تستخدم محليًا فقط لمطابقة الاسم أو الرقم عندما تكون المعلومة متاحة في إشعار WhatsApp.',
++        style: TextStyle(height: 1.55),
++      ),
++      actions: [
++        TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('تخطي')),
++        FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('السماح')),
++      ],
++    ),
++  );
++  if (approved != true) return false;
++  final allowed = await NativeBridge.requestContactsPermission();
++  if (allowed || !context.mounted) return allowed;
++  ScaffoldMessenger.of(context).showSnackBar(
++    SnackBar(
++      content: const Text('ل

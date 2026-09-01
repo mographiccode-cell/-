@@ -1,0 +1,300 @@
+م يتم منح صلاحية جهات الاتصال.'),
++      action: SnackBarAction(label: 'الإعدادات', onPressed: NativeBridge.openAppSettings),
++    ),
++  );
++  return false;
++}
++
+ class HomeShell extends StatefulWidget {
+   const HomeShell({super.key});
+ 
+@@ -732,6 +813,16 @@
+               action: 'تفعيل',
+               onTap: NativeBridge.openNotificationAccessSettings,
+             ),
++          if (!_mediaAccess)
++            _PermissionBanner(
++              icon: Icons.photo_library_outlined,
++              text: 'فعّل وصول الوسائط لحفظ صور وفيديو وصوت WhatsApp داخل ChatVault.',
++              action: 'السماح',
++              onTap: () async {
++                final allowed = await _ensureMediaAccess(context);
++                if (allowed) await _refreshPermissions();
++              },
++            ),
+           Expanded(child: IndexedStack(index: _index, children: pages)),
+         ],
+       ),
+@@ -880,16 +971,25 @@
+           Row(
+             children: [
+               ChoiceChip(
++                avatar: const Icon(Icons.chat_bubble_outline_rounded, size: 16),
+                 label: const Text('المحادثات'),
+                 selected: !_archivedOnly,
+                 onSelected: (_) { setState(() => _archivedOnly = false); _load(); },
+               ),
+               const SizedBox(width: 8),
+               ChoiceChip(
++                avatar: const Icon(Icons.archive_outlined, size: 16),
+                 label: const Text('المؤرشفة'),
+                 selected: _archivedOnly,
+                 onSelected: (_) { setState(() => _archivedOnly = true); _load(); },
+               ),
++              const Spacer(),
++              if (!_loading)
++                Container(
++                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
++                  decoration: BoxDecoration(color: _panel2, borderRadius: BorderRadius.circular(14)),
++                  child: Text('${_items.length} محادثة', style: const TextStyle(color: _muted, fontSize: 10.5, fontWeight: FontWeight.w700)),
++                ),
+             ],
+           ),
+           const SizedBox(height: 12),
+@@ -953,12 +1053,20 @@
+   @override
+   Widget build(BuildContext context) {
+     final initial = conversation.title.trim().isEmpty ? '؟' : conversation.title.trim().substring(0, 1);
+-    return InkWell(
+-      onTap: onTap,
+-      borderRadius: BorderRadius.circular(18),
+-      child: Padding(
+-        padding: const EdgeInsets.symmetric(vertical: 7, horizontal: 4),
+-        child: Row(
++    return Container(
++      margin: const EdgeInsets.only(bottom: 8),
++      decoration: BoxDecoration(
++        color: _panel,
++        borderRadius: BorderRadius.circular(20),
++        border: Border.all(color: conversation.isPinned ? _accent.withValues(alpha: .42) : const Color(0xFF173640)),
++        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: .12), blurRadius: 12, offset: const Offset(0, 5))],
++      ),
++      child: InkWell(
++        onTap: onTap,
++        borderRadius: BorderRadius.circular(20),
++        child: Padding(
++          padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 12),
++          child: Row(
+           children: [
+             Stack(
+               children: [
+@@ -1028,6 +1136,7 @@
+             ),
+           ],
+         ),
++        ),
+       ),
+     );
+   }
+@@ -1532,7 +1641,16 @@
+                         controller: _scroll,
+                         padding: const EdgeInsets.fromLTRB(10, 14, 10, 18),
+                         itemCount: visibleMessages.length,
+-                        itemBuilder: (_, index) => _MessageBubble(message: visibleMessages[index], isGroup: widget.conversation.isGroup, highlightQuery: searchQuery),
++                        itemBuilder: (_, index) {
++                          final message = visibleMessages[index];
++                          final showDay = index == 0 || !_sameDay(visibleMessages[index - 1].postedAt, message.postedAt);
++                          return Column(
++                            children: [
++                              if (showDay) _DaySeparator(milliseconds: message.postedAt),
++                              _MessageBubble(message: message, isGroup: widget.conversation.isGroup, highlightQuery: searchQuery),
++                            ],
++                          );
++                        },
+                       ),
+           ),
+           SafeArea(
+@@ -1580,6 +1698,27 @@
+   }
+ }
+ 
++class _DaySeparator extends StatelessWidget {
++  const _DaySeparator({required this.milliseconds});
++  final int milliseconds;
++
++  @override
++  Widget build(BuildContext context) => Padding(
++        padding: const EdgeInsets.symmetric(vertical: 10),
++        child: Center(
++          child: Container(
++            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
++            decoration: BoxDecoration(
++              color: _panel.withValues(alpha: .94),
++              borderRadius: BorderRadius.circular(20),
++              border: Border.all(color: const Color(0xFF1A3A45)),
++            ),
++            child: Text(_dayLabel(milliseconds), style: const TextStyle(color: _muted, fontSize: 10.5, fontWeight: FontWeight.w700)),
++          ),
++        ),
++      );
++}
++
+ class _MessageBubble extends StatelessWidget {
+   const _MessageBubble({required this.message, required this.isGroup, this.highlightQuery = ''});
+   final ChatMessage message;
+@@ -2101,13 +2240,8 @@
+     if (_syncing) return;
+     setState(() => _syncing = true);
+     try {
+-      var allowed = await NativeBridge.hasMediaPermissions();
+-      if (!allowed) allowed = await NativeBridge.requestMediaPermissions();
+-      if (!allowed) {
+-        if (!mounted) return;
+-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('يجب السماح بالوصول للصور والفيديو والصوت لأرشفة وسائط واتساب.')));
+-        return;
+-      }
++      final allowed = await _ensureMediaAccess(context);
++      if (!allowed) return;
+       final count = await NativeBridge.syncMedia();
+       await _load();
+       widget.onChanged();
+@@ -2385,6 +2519,28 @@
+     );
+   }
+ 
++  Future<void> _requestContacts() async {
++    setState(() => _working = true);
++    try {
++      final allowed = await _ensureContactsAccess(context);
++      if (allowed) await NativeBridge.refreshContacts();
++      await widget.onChanged();
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _requestMedia() async {
++    setState(() => _working = true);
++    try {
++      final allowed = await _ensureMediaAccess(context);
++      if (allowed) await NativeBridge.syncMedia();
++      await widget.onChanged();
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
+   Future<void> _importLegacyRoot() async {
+     if (_working) return;
+     setState(() => _working = true);
+@@ -2486,20 +2642,71 @@
+           onTap: _working ? null : _openGeminiSettings,
+         ),
+         const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.photo_library_outlined,
++          title: 'الصور والفيديو والصوت',
++          subtitle: widget.mediaAccess
++              ? 'مفعّل — يستطيع ChatVault مزامنة وسائط WhatsApp التي يسمح Android بقراءتها.'
++              : 'اختياري — فعّله عند رغبتك في أرشفة الصور والفيديو والرسائل الصوتية محليًا.',
++          status: widget.mediaAccess,
++          action: widget.mediaAccess ? 'مزامنة الآن' : 'منح الصلاحية',
++          onTap: _working
++              ? null
++              : () async {
++                  if (widget.mediaAccess) {
++                    setState(() => _working = true);
++                    try {
++                      final count = await NativeBridge.syncMedia();
++                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت إضافة $count ملف وسائط جديد.')));
++                      await widget.onChanged();
++                    } finally {
++                      if (mounted) setState(() => _working = false);
++                    }
++                  } else {
++                    await _requestMedia();
++                  }
++                },
++        ),
++        const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.contacts_outlined,
++          title: 'جهات الاتصال والأرقام',
++          subtitle: widget.contactsAccess
++              ? 'مفعّل — تتم مطابقة الأسماء والأرقام محليًا عندما تتوفر بيانات كافية في إشعار WhatsApp.'
++              : 'اختياري — يساعد في إظهار الرقم والاسم بشكل أدق، ولا يتم رفع جهات الاتصال إلى Gemini.',
++          status: widget.contactsAccess,
++          action: widget.contactsAccess ? 'تحديث المطابقة' : 'منح الصلاحية',
++          onTap: _working
++              ? null
++              : () async {
++                  if (widget.contactsAccess) {
++                    setState(() => _working = true);
++                    try {
++                      final count = await NativeBridge.refreshContacts();
++                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم تحديث $count سجل.')));
++                      await widget.onChanged();
++                    } finally {
++                      if (mounted) setState(() => _working = false);
++                    }
++                  } else {
++                    await _requestContacts();
++                  }
++                },
++        ),
++        const SizedBox(height: 9),
+         Container(
+           padding: const EdgeInsets.all(14),
+-          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18)),
++          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18), border: Border.all(color: const Color(0xFF173640))),
+           child: const Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+-              Row(children: [Icon(Icons.security_rounded, color: _accent), SizedBox(width: 9), Text('وضع الصلاحيات الخفيف', style: TextStyle(fontWeight: FontWeight.w800))]),
++              Row(children: [Icon(Icons.verified_user_outlined, color: _accent), SizedBox(width: 9), Text('صلاحيات عند الحاجة فقط', style: TextStyle(fontWeight: FontWeight.w800))]),
+               SizedBox(height: 7),
+-              Text('لا يطلب هذا الإصدار صلاحيات الصور أو الفيديو أو الصوت أو جهات الاتصال. إرسال الملفات والاستيراد اليدوي يستخدمان منتقي ملفات Android الآمن.', style: TextStyle(color: _muted, height: 1.5, fontSize: 11.5)),
++              Text('لا يطلب ChatVault صلاحيات حساسة تلقائيًا عند التشغيل. تظهر نافذة شرح أولًا، ثم نافذة Android الرسمية عند استخدام ميزة تحتاج الصلاحية. لا نستخدم MANAGE_EXTERNAL_STORAGE أو Accessibility أو أي صلاحيات شاملة غير لازمة.', style: TextStyle(color: _muted, height: 1.5, fontSize: 11.5)),
+             ],
+           ),
+         ),
+         const SizedBox(height: 9),
+-        const SizedBox(height: 9),
+         _SettingCard(
+           icon: Icons.move_to_inbox_rounded,
+           title: 'استيراد بيانات ChatVault القديمة',
+@@ -2550,7 +2757,7 @@
+           label: const Text('حذف كل بيانات ChatVault المحلية', style: TextStyle(color: Color(0xFFFF6577))),
+         ),
+         const SizedBox(height: 14),
+-        const Center(child: Text('ChatVault Next 5.1.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
++        const Center(child: Text('ChatVault Next 5.2.0 • Android', style: TextStyle(color: _muted, fontSize: 10.5))),
+       ],
+     );
+   }
+@@ -2823,6 +3030,23 @@
+       );
+ }
+ 
++bool _sameDay(int a, int b) {
++  final first = DateTime.fromMillisecondsSinceEpoch(a);
++  final second = DateTime.fromMillisecondsSinceEpoch(b);
++  return first.year == second.year && first.month == second.month && first.day == second.day;
++}
++
++String _dayLabel(int milliseconds) {
++  final value = DateTime.fromMillisecondsSinceEpoch(milliseconds);
++  final now = DateTime.now();
++  final today = DateTime(now.year, now.month, now.day);
++  final date = DateTime(value.year, value.month, value.day);
++  final delta = today.difference(date).inDays;
++  if (delta == 0) return 'اليوم';
++  if (delta == 1) return 'أمس';
++  return '${value.day.toString().padLeft(2, '0')}/${value.month.toString().padLeft(2, '0')}/${value.year}';
++}
++
+ String _time(int milliseconds) {
+   if (milliseconds <= 0) return '--:--';
+   final d = DateTime.fromMillisecondsSinceEpoch(milliseconds);
+diff -ruN orig_v51/pubspec.yaml src/pubspec.yaml
+--- orig_v51/pubspec.yaml	2026-08-31 23:51:57.000000000 +0000
++++ src/pubspec.yaml	2026-09-01 15:42:34.888145235 +0000
+@@ -1,7 +1,7 @@
+ name: chatvault
+ description: Local WhatsApp notification archive with optional Gemini multimodal analysis.
+ publish_to: "none"
+-version: 5.1.0+3
++version: 5.2.0+4
+ 
+ environment:
+   sdk: ">=3.8.0 <4.0.0"

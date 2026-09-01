@@ -1,0 +1,117 @@
+return;
+-      }
++      final allowed = await _ensureMediaAccess(context);
++      if (!allowed) return;
+       final count = await NativeBridge.syncMedia();
+       await _load();
+       widget.onChanged();
+@@ -2385,6 +2519,28 @@
+     );
+   }
+ 
++  Future<void> _requestContacts() async {
++    setState(() => _working = true);
++    try {
++      final allowed = await _ensureContactsAccess(context);
++      if (allowed) await NativeBridge.refreshContacts();
++      await widget.onChanged();
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
++  Future<void> _requestMedia() async {
++    setState(() => _working = true);
++    try {
++      final allowed = await _ensureMediaAccess(context);
++      if (allowed) await NativeBridge.syncMedia();
++      await widget.onChanged();
++    } finally {
++      if (mounted) setState(() => _working = false);
++    }
++  }
++
+   Future<void> _importLegacyRoot() async {
+     if (_working) return;
+     setState(() => _working = true);
+@@ -2486,20 +2642,71 @@
+           onTap: _working ? null : _openGeminiSettings,
+         ),
+         const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.photo_library_outlined,
++          title: 'الصور والفيديو والصوت',
++          subtitle: widget.mediaAccess
++              ? 'مفعّل — يستطيع ChatVault مزامنة وسائط WhatsApp التي يسمح Android بقراءتها.'
++              : 'اختياري — فعّله عند رغبتك في أرشفة الصور والفيديو والرسائل الصوتية محليًا.',
++          status: widget.mediaAccess,
++          action: widget.mediaAccess ? 'مزامنة الآن' : 'منح الصلاحية',
++          onTap: _working
++              ? null
++              : () async {
++                  if (widget.mediaAccess) {
++                    setState(() => _working = true);
++                    try {
++                      final count = await NativeBridge.syncMedia();
++                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تمت إضافة $count ملف وسائط جديد.')));
++                      await widget.onChanged();
++                    } finally {
++                      if (mounted) setState(() => _working = false);
++                    }
++                  } else {
++                    await _requestMedia();
++                  }
++                },
++        ),
++        const SizedBox(height: 9),
++        _SettingCard(
++          icon: Icons.contacts_outlined,
++          title: 'جهات الاتصال والأرقام',
++          subtitle: widget.contactsAccess
++              ? 'مفعّل — تتم مطابقة الأسماء والأرقام محليًا عندما تتوفر بيانات كافية في إشعار WhatsApp.'
++              : 'اختياري — يساعد في إظهار الرقم والاسم بشكل أدق، ولا يتم رفع جهات الاتصال إلى Gemini.',
++          status: widget.contactsAccess,
++          action: widget.contactsAccess ? 'تحديث المطابقة' : 'منح الصلاحية',
++          onTap: _working
++              ? null
++              : () async {
++                  if (widget.contactsAccess) {
++                    setState(() => _working = true);
++                    try {
++                      final count = await NativeBridge.refreshContacts();
++                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('تم تحديث $count سجل.')));
++                      await widget.onChanged();
++                    } finally {
++                      if (mounted) setState(() => _working = false);
++                    }
++                  } else {
++                    await _requestContacts();
++                  }
++                },
++        ),
++        const SizedBox(height: 9),
+         Container(
+           padding: const EdgeInsets.all(14),
+-          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18)),
++          decoration: BoxDecoration(color: _panel, borderRadius: BorderRadius.circular(18), border: Border.all(color: const Color(0xFF173640))),
+           child: const Column(
+             crossAxisAlignment: CrossAxisAlignment.start,
+             children: [
+-              Row(children: [Icon(Icons.security_rounded, color: _accent), SizedBox(width: 9), Text('وضع الصلاحيات الخفيف', style: TextStyle(fontWeight: FontWeight.w800))]),
++              Row(children: [Icon(Icons.verified_user_outlined, color: _accent), SizedBox(width: 9), Text('صلاحيات عند الحاجة فقط', style: TextStyle(fontWeight: FontWeight.w800))]),
+               SizedBox(height: 7),
+-              Text('لا يطلب هذا الإصدار صلاحيات الصور أو الفيديو أو الصوت أو جهات الاتصال. إرسال الملفات والاستيراد اليدوي يستخدمان منتقي ملفات Android الآمن.', style: TextStyle(color: _muted, height: 1.5, fontSize: 11.5)),
++              Text('لا يطلب ChatVault صلاحيات حساسة تلقائيًا عند التشغيل. تظهر نافذة شرح أولًا، ثم نافذة Android الرسمية عند استخدام ميزة تحتاج الصلاحية. لا نستخدم MANAGE_EXTERNAL_STORAGE أو Accessibility أو أي صلاحيات شاملة غير لازمة.', style: TextStyle(color: _muted, height: 1.5, fontSize: 11.5)),
+             ],
+           ),
+         ),
+         const SizedBox(height: 9),
+-        const SizedBox(height: 9),
+         _SettingCard(
+           icon: Icons.move_to_inbox_rounded,
+           title: 'استيراد بيانات ChatVault القديمة',
+@@ -2550,7 +2757,7 @@
+           label: const Text('حذف كل بيانات ChatVault المحلية', style: TextStyle(color: Color(0xFFFF6577))),
+         ),
+         const SizedBox(height: 14),
+-        const Center(c

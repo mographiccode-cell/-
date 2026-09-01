@@ -1,0 +1,104 @@
+diff -ruN orig_v51/android/app/src/main/AndroidManifest.xml src/android/app/src/main/AndroidManifest.xml
+--- orig_v51/android/app/src/main/AndroidManifest.xml	2026-08-31 23:50:10.000000000 +0000
++++ src/android/app/src/main/AndroidManifest.xml	2026-09-01 15:39:33.329813257 +0000
+@@ -1,5 +1,12 @@
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+     <uses-permission android:name="android.permission.INTERNET" />
++    <!-- Runtime permissions used only after the user explicitly enables media/contact features. -->
++    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
++    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
++    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
++    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
++    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
++    <uses-permission android:name="android.permission.READ_CONTACTS" />
+ 
+     <queries>
+         <package android:name="com.whatsapp" />
+diff -ruN orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
+--- orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-08-31 14:13:54.000000000 +0000
++++ src/android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt	2026-09-01 15:39:24.505492351 +0000
+@@ -294,6 +294,14 @@
+         val normalizedBody = body.trim().ifBlank { typeLabel(messageType) }
+         if (normalizedBody.isBlank()) return -1
+ 
++        // A Direct Reply is stored immediately by ChatVault, then WhatsApp often republishes
++        // the same text in the next notification snapshot. The notification copy can have a
++        // different timestamp and even be misclassified as incoming, so dedupe it against the
++        // recent local Direct Reply before touching conversation counters.
++        if (source.startsWith("notification")) {
++            findRecentDirectReplyDuplicate(conversationKey, normalizedBody, postedAt)?.let { return it }
++        }
++
+         upsertConversation(
+             conversationKey = conversationKey,
+             packageName = packageName,
+@@ -355,6 +363,27 @@
+         return id
+     }
+ 
++    private fun findRecentDirectReplyDuplicate(conversationKey: String, body: String, postedAt: Long): Long? {
++        val windowStart = postedAt - 10_000L
++        val windowEnd = postedAt + 10_000L
++        readableDatabase.rawQuery(
++            """
++            SELECT id FROM $TABLE_MESSAGES
++             WHERE conversation_key = ?
++               AND direction = 'outgoing'
++               AND source = 'direct_reply'
++               AND body = ?
++               AND posted_at BETWEEN ? AND ?
++               AND is_system_summary = 0
++             ORDER BY ABS(posted_at - ?) ASC, id DESC
++             LIMIT 1
++            """.trimIndent(),
++            arrayOf(conversationKey, body, windowStart.toString(), windowEnd.toString(), postedAt.toString()),
++        ).use { cursor ->
++            return if (cursor.moveToFirst()) cursor.getLong(0) else null
++        }
++    }
++
+     private fun matchDeletionSignal(db: SQLiteDatabase, conversationKey: String, postedAt: Long, signalId: Long) {
+         db.rawQuery(
+             """
+diff -ruN orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+--- orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-08-31 23:49:57.000000000 +0000
++++ src/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-09-01 15:39:58.877441083 +0000
+@@ -64,6 +64,10 @@
+                     startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                     result.success(null)
+                 }
++                "openAppSettings" -> {
++                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
++                    result.success(null)
++                }
+                 "hasMediaPermissions" -> result.success(hasMediaPermissions())
+                 "requestMediaPermissions" -> requestMediaPermissions(result)
+                 "hasContactsPermission" -> result.success(hasContactsPermission())
+@@ -456,14 +460,31 @@
+         return enabled.split(":").any { ComponentName.unflattenFromString(it) == component }
+     }
+ 
+-    private fun requiredMediaPermissions(): Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+-        arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO)
+-    } else {
+-        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
++    private fun requiredMediaPermissions(): Array<String> = when {
++        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
++            Manifest.permission.READ_MEDIA_IMAGES,
++            Manifest.permission.READ_MEDIA_VIDEO,
++            Manifest.permission.READ_MEDIA_AUDIO,
++            Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
++        )
++        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
++            Manifest.permission.READ_MEDIA_IMAGES,
++            Manifest.permission.READ_MEDIA_VIDEO,
++            Manifest.permission.READ_MEDIA_AUDIO,
++        )
++        else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+     }
+ 
+-    private fun hasMediaPermissions(): Boolean = requiredMediaPermissions().all {
+-        checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
++    private fun hasMediaPermissions(): Boolean {
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
++            return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMIS

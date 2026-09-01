@@ -1,0 +1,109 @@
+SION_GRANTED
++        }
++        val fullVisual = checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
++            checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
++        val selectedVisual = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE &&
++            checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED
++        val audio = checkSelfPermission(Manifest.permission.READ_MEDIA_AUDIO) == PackageManager.PERMISSION_GRANTED
++        return (fullVisual || selectedVisual) && audio
+     }
+ 
+     private fun hasContactsPermission(): Boolean = checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+diff -ruN orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/ReplyRegistry.kt src/android/app/src/main/kotlin/com/mographiccode/chatvault/ReplyRegistry.kt
+--- orig_v51/android/app/src/main/kotlin/com/mographiccode/chatvault/ReplyRegistry.kt	2026-08-29 20:39:08.000000000 +0000
++++ src/android/app/src/main/kotlin/com/mographiccode/chatvault/ReplyRegistry.kt	2026-09-01 15:44:28.903310319 +0000
+@@ -7,6 +7,7 @@
+ import android.content.Intent
+ import android.os.Bundle
+ import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.CopyOnWriteArrayList
+ 
+ data class ReplyTarget(
+     val conversationKey: String,
+@@ -15,8 +16,15 @@
+     val remoteInput: RemoteInput,
+ )
+ 
++private data class PendingLocalReply(
++    val normalizedText: String,
++    val sentAt: Long,
++)
++
+ object ReplyRegistry {
+     private val targets = ConcurrentHashMap<String, ReplyTarget>()
++    private val pendingLocalReplies = ConcurrentHashMap<String, CopyOnWriteArrayList<PendingLocalReply>>()
++    private const val LOCAL_ECHO_WINDOW_MS = 12_000L
+ 
+     fun register(conversationKey: String, notificationKey: String, notification: Notification) {
+         val action = notification.actions?.firstOrNull { candidate ->
+@@ -32,17 +40,64 @@
+ 
+     fun canReply(conversationKey: String): Boolean = targets.containsKey(conversationKey)
+ 
++    fun markLocalReply(conversationKey: String, text: String, sentAt: Long = System.currentTimeMillis()) {
++        val normalized = normalizeText(text)
++        if (conversationKey.isBlank() || normalized.isBlank()) return
++        cleanupPending(sentAt)
++        pendingLocalReplies.compute(conversationKey) { _, existing ->
++            val list = existing ?: CopyOnWriteArrayList()
++            list.add(PendingLocalReply(normalized, sentAt))
++            while (list.size > 8) list.removeAt(0)
++            list
++        }
++    }
++
++    fun removeLocalReply(conversationKey: String, text: String) {
++        val normalized = normalizeText(text)
++        pendingLocalReplies.computeIfPresent(conversationKey) { _, list ->
++            list.removeAll { it.normalizedText == normalized }
++            if (list.isEmpty()) null else list
++        }
++    }
++
++    fun isRecentLocalReplyEcho(
++        conversationKey: String,
++        text: String,
++        eventAt: Long = System.currentTimeMillis(),
++    ): Boolean {
++        val normalized = normalizeText(text)
++        if (conversationKey.isBlank() || normalized.isBlank()) return false
++        cleanupPending(eventAt)
++        return pendingLocalReplies[conversationKey]?.any {
++            it.normalizedText == normalized && kotlin.math.abs(eventAt - it.sentAt) <= LOCAL_ECHO_WINDOW_MS
++        } == true
++    }
++
+     fun send(context: Context, conversationKey: String, text: String): Result<Unit> {
+         val target = targets[conversationKey] ?: return Result.failure(IllegalStateException("Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ø¥Ø¶.v)ö,H6,v+È6a¶-6-È6a6aö,6aÈ6)öa6av+v)ö+ö*ö*HŠJBˆYˆ
+^š\Ğ›[šÊ
+JH™]\›ˆ™\İ[™˜Z[\™J[YØ[\™İ[Y[^Ù\[ÛŠ¶)öa6,v,ö)öa6*H6`v)ö,v.¶*HŠJBŠÈ˜[Ù[]HŞ\İ[K˜İ\œ™[[YSZ[\Ê
+BŠÈX\šÓØØ[™\JÛÛ™\œØ][Û’Ù^K^Ù[]
+Bˆ™]\›ˆ[Ø]Ú[™ÈÂˆ˜[[[H[[
+
+Bˆ˜[™\İ[ÈH[™J
+K˜\HÈ]Ú\”Ù\]Y[˜ÙJ\™Ù]œ™[[İR[œ]œ™\İ[Ù^K^
+HBˆ™[[İR[œ]˜Y™\İ[ÕÒ[[
+\œ˜^SÙŠ\™Ù]œ™[[İR[œ]
+K[[™\İ[ÊBˆ\™Ù]˜Xİ[Û‹˜Xİ[Û’[[œÙ[™
+ÛÛ^[[
+BˆKœ™XÛİ™\Ø]Ú[™ÈÈ\œ›ÜˆO‚ŠÈ™[[İ™SØØ[™\JÛÛ™\œØ][Û’Ù^K^
+BˆYˆ
+\œ›Üˆ\È[™[™Ò[[Ø[˜Ù[Y^Ù\[ÛŠH\™Ù]Ëœ™[[İ™JÛÛ™\œØ][Û’Ù^JBˆ›İÈ\œ›Ü‚ˆBˆBŠÂŠÈš]˜]H[ˆÛX[\[™[™Ê›İÎˆÛ™ÊHÂŠÈ[™[™ÓØØ[™\Y\Ë™[šY\Ë™›Ü‘XXÚÈ[HO‚ŠÈ[K˜[YKœ™[[İ™P[È›İÈH]œÙ[]ˆĞĞSÑPÒ×ÕÒS‘Õ×ÓTÈ
+ˆˆ]œÙ[]H›İÈˆĞĞSÑPÒ×ÕÒS‘Õ×ÓTÈ
+ˆˆBŠÈYˆ
+[K˜[YKš\Ñ[\J
+JH[™[™ÓØØ[™\Y\Ëœ™[[İ™J[KšÙ^K[K˜[YJBŠÈBŠÈBŠÂŠÈš]˜]H[ˆ›Ü›X[^™U^
+˜[YNˆİš[™ÊNˆİš[™ÈH˜[YBŠÈš[J
+BŠÈœ™\XÙJ™YÙ^
+—ÊÈŠKˆŠBˆB™Y™ˆ\SˆÜšY×İLKØ[™›ÚYØ\ÜÜ˜ËÛXZ[‹ÚÛİ[‹ØÛÛKÛ[ÙÜ˜\XØÛÙKØÚ]˜][ÕÚ]Ğ\›İYšXØ][Û“\İ[™\‹šİÜ˜ËØ[™›ÚYØ\ÜÜ˜ËÛXZ[‹ÚÛİ[‹ØÛÛKÛ[ÙÜ˜\XØÛÙKØÚ]˜][ÕÚ]Ğ\›İYšXØ][Û“\İ[™\‹šİ‹KKHÜšY×İLKØ[™›ÚYØ\ÜÜ˜ËÛXZ[‹ÚÛİ[‹ØÛÛKÛ[ÙÜ˜\XØÛÙKØÚ]˜][ÕÚ]Ğ\›İYšXØ][Û“\İ[™\‹šİLŒ‹LLÌMNŒLÎŒNŒ
+ÌŠÊÊÈÜ˜ËØ[™›ÚYØ\ÜÜ˜ËÛXZ[‹ÚÛİ[‹ØÛÛKÛ[ÙÜ˜\XØÛÙKØÚ]˜][ÕÚ]Ğ\›İYšXØ][Û“\İ[™\‹šİLŒ‹LKLHMNŒÎNŒL‹ŒÍMÌÍN
+ÌLLÎˆ
+ÌLÎLHˆ˜[Ù[™\ÛÛXİHYˆ
+\™Xİ[ÛˆOHš[˜ÛÛZ[™ÈŠHÛÛXİËœ™\ÛÛ™J˜]ÔÙ[™\‹\œÛÛ•\šJ\œÛÛŠJH[ÙHÛÛXİ™\ÛÛ™\‹ÛÛXİ[™›Ê\Ü^S˜[YHH¶(öa¶)ÈŠBˆ˜[Ù[™\ˆHYˆ
+\™Xİ[ÛˆOH›İ]ÛÚ[™ÈŠH¶(öa¶)Èˆ[ÙHš\œİYX[š[™Ù[
+Ù[™\ÛÛXİ™\Ü^S˜[YK˜]ÔÙ[™\‹Ù[™\ÛÛXİœÛ™S[X™\ŠBˆ˜[ÜİY]HYˆ
+Y\ÜØYÙK[Y\İ[\ˆ
+HY\ÜØYÙK[Y\İ[\[ÙHØ›‹œÜİ[YBŠÈËÈ\™Xİ™\HØ]\Ù\ÈÚ]Ğ\È[[YYX][HX›\Úİ\ˆİÛˆ™\H˜XÚÈ[œÚYBŠÈËÈY\ÜØYÚ[™Ôİ[KˆÚ]˜][[™XYHİÜ™\ÈHØØ[™\HÚ[ˆ]\ÈÙ[ÛÂŠÈËÈYÛ›Ü™H\È›İYšXØ][ÛˆXÚÈ[œİXYÙˆÜ™X][™ÈHÙXÛÛ™ÛÜH
+Üˆ™X][™ÂŠÈËÈ]\È[ˆ[˜ÛÛZ[™ÈY\ÜØYÙHÛˆÚ]Ğ\Z[È]ÛZ]Ù[™\ˆY]Y]JK‚ŠÈYˆ
+™\T™YÚ\İKš\Ô™XÙ[ØØ[™\QXÚÊÛÛ™\œØ][Û’Ù^K›ÙKÜİY]
+JH™]\››Ü‘XXÚˆ˜[YH‹š[œÙ\Y\ÜØYÙJˆÛÛ™\œØ][Û’Ù^HHÛÛ™\œØ][Û’Ù^K
