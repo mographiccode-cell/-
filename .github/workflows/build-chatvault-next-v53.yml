@@ -129,7 +129,7 @@ jobs:
           grep -q 'conversation_key TEXT' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
           grep -q 'link_confidence REAL' android/app/src/main/kotlin/com/mographiccode/chatvault/LocalMessageDatabase.kt
           grep -q 'assignMediaToConversation' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
-          grep -q 'pickWhatsAppMediaFolder' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+          grep -q 'chooseWhatsAppMediaFolder' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'syncWhatsAppMedia' android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
           grep -q 'مجلد WhatsApp Media' lib/main.dart
           grep -q 'ChatVault Next 5.3.0' lib/main.dart
