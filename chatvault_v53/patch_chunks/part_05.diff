@@ -1,0 +1,257 @@
+-                val packageName = if (path.contains("com.whatsapp.w4b", ignoreCase = true) || path.contains("WhatsApp Business", ignoreCase = true)) {
+-                    "com.whatsapp.w4b"
+-                } else {
+-                    "com.whatsapp"
++                val id = it.getLong(idIndex)
++                val displayName = it.getString(nameIndex) ?: continue
++                var mimeType = if (mimeIndex >= 0 && !it.isNull(mimeIndex)) it.getString(mimeIndex) else null
++                val addedAt = if (addedIndex >= 0 && !it.isNull(addedIndex)) it.getLong(addedIndex) * 1000L else 0L
++                val modifiedAt = if (modifiedIndex >= 0 && !it.isNull(modifiedIndex)) it.getLong(modifiedIndex) * 1000L else 0L
++                val createdAt = when {
++                    modifiedAt > 0 -> modifiedAt
++                    addedAt > 0 -> addedAt
++                    else -> System.currentTimeMillis()
+                 }
+-                if (db.mediaAlreadyArchived(packageName, displayName, createdAt)) continue
++                val fileSize = if (sizeIndex >= 0 && !it.isNull(sizeIndex)) it.getLong(sizeIndex) else 0L
++                val path = if (pathIndex >= 0 && !it.isNull(pathIndex)) it.getString(pathIndex).orEmpty() else ""
++                if (!looksLikeWhatsAppPath(path)) continue
++                mimeType = normalizeMimeType(null, mimeType, displayName)
++                if (documentsOnly && mimeToType(mimeType) != "document") continue
++                if (!isSupportedMediaFile(displayName, mimeType, path)) continue
++                val packageName = packageFromPath(path)
+                 val sourceUri = ContentUris.withAppendedId(collection, id)
+-                val archived = copyUri(sourceUri, displayName, mimeType) ?: continue
+-                val messageId = db.findBestMessageForMedia(packageName, mimeType, createdAt)
+-                val mediaId = db.insertMedia(
+-                    packageName,
+-                    displayName,
+-                    mimeType,
+-                    sourceUri.toString(),
+-                    archived.absolutePath,
+-                    createdAt,
+-                    messageId,
+-                )
+-                if (mediaId > 0) {
+-                    if (messageId != null) db.attachMediaToMessage(messageId, archived.absolutePath, mimeType, mimeToType(mimeType))
+-                    copied++
+-                } else {
+-                    archived.delete()
+-                }
++                val preferOutgoing = pathContainsSent(path)
++                if (archiveCandidate(sourceUri, packageName, displayName, mimeType, createdAt, fileSize, preferOutgoing)) copied++
+             }
+         }
+         return copied
+     }
+ 
++    private data class TreeCounter(var inspected: Int = 0, var archived: Int = 0)
++
++    private fun scanTree(treeUri: Uri, packageName: String, maxFiles: Int): Int {
++        val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull() ?: return 0
++        val counter = TreeCounter()
++        scanTreeChildren(treeUri, rootId, "", packageName, counter, maxFiles.coerceIn(100, 10_000), depth = 0)
++        return counter.archived
++    }
++
++    private fun scanTreeChildren(
++        treeUri: Uri,
++        parentDocumentId: String,
++        logicalPath: String,
++        packageName: String,
++        counter: TreeCounter,
++        maxFiles: Int,
++        depth: Int,
++    ) {
++        if (counter.inspected >= maxFiles || depth > 12) return
++        val childrenUri = runCatching {
++            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
++        }.getOrNull() ?: return
++        val projection = arrayOf(
++            DocumentsContract.Document.COLUMN_DOCUMENT_ID,
++            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
++            DocumentsContract.Document.COLUMN_MIME_TYPE,
++            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
++            DocumentsContract.Document.COLUMN_SIZE,
++        )
++        val rows = mutableListOf<Array<Any?>>()
++        runCatching {
++            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
++                val idIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
++                val nameIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
++                val mimeIndex = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
++                val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
++                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
++                while (cursor.moveToNext()) {
++                    rows += arrayOf(
++                        cursor.getString(idIndex),
++                        cursor.getString(nameIndex).orEmpty(),
++                        cursor.getString(mimeIndex).orEmpty(),
++                        if (modifiedIndex >= 0 && !cursor.isNull(modifiedIndex)) cursor.getLong(modifiedIndex) else 0L,
++                        if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) cursor.getLong(sizeIndex) else 0L,
++                    )
++                }
++            }
++        }.getOrElse { return }
++
++        rows.sortedByDescending { (it[3] as Long) }.forEach { row ->
++            if (counter.inspected >= maxFiles) return
++            val documentId = row[0] as String
++            val name = row[1] as String
++            val mime = row[2] as String
++            val modifiedAt = row[3] as Long
++            val size = row[4] as Long
++            val nextPath = if (logicalPath.isBlank()) name else "$logicalPath/$name"
++            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
++                if (shouldEnterDirectory(name, logicalPath)) {
++                    scanTreeChildren(treeUri, documentId, nextPath, packageName, counter, maxFiles, depth + 1)
++                }
++                return@forEach
++            }
++            counter.inspected++
++            if (!isSupportedMediaFile(name, mime, nextPath)) return@forEach
++            val sourceUri = runCatching { DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId) }.getOrNull() ?: return@forEach
++            val resolvedMime = normalizeMimeType(sourceUri, mime, name)
++            val createdAt = if (modifiedAt > 0) modifiedAt else System.currentTimeMillis()
++            if (archiveCandidate(sourceUri, packageName, name, resolvedMime, createdAt, size, pathContainsSent(nextPath))) {
++                counter.archived++
++            }
++        }
++    }
++
++    private fun archiveCandidate(
++        uri: Uri,
++        packageName: String,
++        displayName: String,
++        mimeType: String?,
++        createdAt: Long,
++        fileSize: Long,
++        preferOutgoing: Boolean?,
++    ): Boolean {
++        val uriText = uri.toString()
++        if (db.mediaUriAlreadyArchived(uriText)) return false
++        if (db.mediaAlreadyArchived(packageName, displayName, createdAt, fileSize)) return false
++        val archived = copyUri(uri, displayName, mimeType) ?: return false
++        val match = db.findBestMediaMatch(packageName, mimeType, createdAt, preferOutgoing)
++        val mediaId = db.insertMedia(
++            packageName = packageName,
++            fileName = displayName,
++            mimeType = mimeType,
++            originalUri = uriText,
++            localPath = archived.absolutePath,
++            sourceCreatedAt = createdAt,
++            messageId = match?.messageId,
++            conversationKey = match?.conversationKey,
++            linkConfidence = match?.confidence ?: 0.0,
++            linkSource = match?.source ?: "unlinked",
++            fileSize = if (fileSize > 0) fileSize else archived.length(),
++        )
++        if (mediaId <= 0) {
++            archived.delete()
++            return false
++        }
++        if (match != null) {
++            db.attachMediaToMessage(match.messageId, archived.absolutePath, mimeType, mimeToType(mimeType))
++        }
++        return true
++    }
++
+     private fun copyUri(uri: Uri, fileName: String, mimeType: String?): File? = runCatching {
+         val safeName = sanitizeFileName(fileName).ifBlank { "media_${System.currentTimeMillis()}.${extensionFor(mimeType)}" }
+-        val digest = sha256(uri.toString()).take(10)
++        val digest = sha256(uri.toString()).take(12)
+         val target = File(archiveDir, "${digest}_$safeName")
+         context.contentResolver.openInputStream(uri)?.use { input ->
+             FileOutputStream(target).use { output -> input.copyTo(output) }
+@@ -109,6 +293,26 @@
+         target
+     }.getOrNull()
+ 
++    private fun shouldEnterDirectory(name: String, parentPath: String): Boolean {
++        val value = name.trim().lowercase()
++        if (value in setOf(".statuses", "statuses", ".trash", "trash", "wallpaper", "wallpapers", "profile photos")) return false
++        if (parentPath.isNotBlank()) return true
++        return listOf("image", "video", "audio", "voice", "document", "gif", "sticker", "media").any { value.contains(it) }
++    }
++
++    private fun isSupportedMediaFile(fileName: String, mimeType: String?, logicalPath: String): Boolean {
++        if (fileName.equals(".nomedia", true) || fileName.startsWith(".")) return false
++        val path = logicalPath.lowercase()
++        if (path.contains("/.statuses/") || path.startsWith(".statuses/")) return false
++        val type = mimeToType(mimeType)
++        if (type != "document") return true
++        val extension = fileName.substringAfterLast('.', "").lowercase()
++        return extension in setOf(
++            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "rtf",
++            "zip", "rar", "7z", "json", "xml", "vcf", "apk", "epub", "mobi", "html", "htm",
++        ) || path.contains("document")
++    }
++
+     private fun looksLikeWhatsAppPath(path: String): Boolean {
+         val value = path.lowercase()
+         return value.contains("whatsapp/media") ||
+@@ -117,6 +321,46 @@
+             value.contains("whatsapp business/media")
+     }
+ 
++    private fun packageFromPath(path: String): String {
++        val value = path.lowercase()
++        return if (value.contains("com.whatsapp.w4b") || value.contains("whatsapp business")) "com.whatsapp.w4b" else "com.whatsapp"
++    }
++
++    private fun packageFromTreeUri(uri: Uri): String {
++        val id = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull().orEmpty().lowercase()
++        val value = "$id|${uri.toString().lowercase()}"
++        return if (value.contains("com.whatsapp.w4b") || value.contains("whatsapp business")) "com.whatsapp.w4b" else "com.whatsapp"
++    }
++
++    private fun pathContainsSent(path: String): Boolean? {
++        if (path.isBlank()) return null
++        val segments = path.lowercase().split('/', '\\')
++        return segments.any { it == "sent" }
++    }
++
++    private fun normalizeMimeType(uri: Uri?, mimeType: String?, fileName: String?): String? {
++        val candidate = mimeType?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
++            ?: uri?.let { runCatching { context.contentResolver.getType(it) }.getOrNull() }
++        if (!candidate.isNullOrBlank()) return candidate
++        val ext = fileName?.substringAfterLast('.', "")?.lowercase().orEmpty()
++        if (ext.isBlank()) return null
++        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: when (ext) {
++            "pdf" -> "application/pdf"
++            "doc" -> "application/msword"
++            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
++            "xls" -> "application/vnd.ms-excel"
++            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
++            "ppt" -> "application/vnd.ms-powerpoint"
++            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
++            "zip" -> "application/zip"
++            "rar" -> "application/vnd.rar"
++            "7z" -> "application/x-7z-compressed"
++            "txt" -> "text/plain"
++            "csv" -> "text/csv"
++            else -> "application/octet-stream"
++        }
++    }
++
+     private fun mimeToType(mimeType: String?): String = when {
+         mimeType == null -> "document"
+         mimeType.startsWith("image/gif") -> "gif"
+@@ -136,10 +380,11 @@
+         mimeType.contains("mpeg") -> "mp3"
+         mimeType.contains("ogg") -> "ogg"
+         mimeType.contains("pdf") -> "pdf"
+-        else -> mimeType.substringAfter('/', "bin").substringBefore(';').take(8)
++        else -> mimeType.substringAfter('/', "bin").substringBefore(';').take(12)
+     }
+ 
+-    private fun sanitizeFileName(value: String): String = value.replace(Regex("[^A-Za-z0-9._() -]"), "_").take(120)
++    private fun sanitizeFileName(value: String): String =
++        value.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), "_").trim().take(150)
+ 
+     private fun sha256(value: String): String {
+         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+ diff -ruN '--exclude=.dart_tool' '--exclude=.idea' '--exclude=*.orig' '--exclude=pubspec.lock' source_v52/lib/main.dart source_v53/lib/main.dart
+--- source_v52/lib/main.dart	2026-09-01 17:50:01.000000000 +0000
++++ source_v53/lib/main.dart	2026-09-01 18:02:47.013037688 +0000
+@@ -133,6 +133,25 @@
