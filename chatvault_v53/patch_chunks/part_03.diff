@@ -1,0 +1,216 @@
++            buildList {
++                while (cursor.moveToNext()) {
++                    add(arrayOf<Any?>(cursor.getLong(0), cursor.getString(1), cursor.getString(2), cursor.getLong(3), cursor.getString(4)))
++                }
++            }
++        }
++        var linked = 0
++        rows.forEach { row ->
++            val mediaId = row[0] as Long
++            val packageName = row[1] as String
++            val mime = row[2] as String?
++            val createdAt = row[3] as Long
++            val localPath = row[4] as String
++            val match = findBestMediaMatch(packageName, mime, createdAt, null) ?: return@forEach
++            val db = writableDatabase
++            db.beginTransaction()
++            try {
++                db.execSQL(
++                    "UPDATE $TABLE_MEDIA SET message_id = ?, conversation_key = ?, link_confidence = ?, link_source = ? WHERE id = ?",
++                    arrayOf<Any?>(match.messageId, match.conversationKey, match.confidence, "relink_${match.source}", mediaId),
++                )
++                db.execSQL(
++                    "UPDATE $TABLE_MESSAGES SET media_path = ?, mime_type = ?, message_type = ? WHERE id = ? AND media_path IS NULL",
++                    arrayOf<Any?>(localPath, mime, mimeToType(mime), match.messageId),
++                )
++                db.setTransactionSuccessful()
++                linked++
++            } finally {
++                db.endTransaction()
++            }
++            NativeEventBus.dataChanged(match.conversationKey, "media_relinked")
++        }
++        return linked
++    }
++
++    private fun mediaHintLabels(type: String): List<String> = when (type) {
++        "image", "gif" -> listOf("صورة", "photo", "image", "gif", "📷")
++        "video" -> listOf("فيديو", "video", "🎥")
++        "audio" -> listOf("صوت", "audio", "voice", "رسالة صوتية", "تسجيل", "🎵", "🎤")
++        "document" -> listOf("ملف", "مستند", "document", "pdf", "doc", "xls", "ppt", "zip")
++        else -> emptyList()
++    }
++
++    private fun mediaTypesCompatible(mediaType: String, messageType: String): Boolean = when (mediaType) {
++        "gif" -> messageType == "gif" || messageType == "image"
++        "image" -> messageType == "image" || messageType == "sticker" || messageType == "gif"
++        "video" -> messageType == "video"
++        "audio" -> messageType == "audio"
++        "document" -> messageType == "document"
++        else -> false
+     }
+ 
+     fun refreshContactDetails(): Int {
+@@ -554,7 +745,7 @@
+                    COALESCE(NULLIF(c.contact_name,''), c.title) AS display_title,
+                    c.title, c.is_group, c.last_message, c.last_message_at, c.message_count,
+                    (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key = c.conversation_key AND m.is_deleted = 1 AND m.is_system_summary = 0) AS deleted_count,
+-                   (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key = c.conversation_key AND m.media_path IS NOT NULL AND m.is_system_summary = 0) AS media_count,
++                   (SELECT COUNT(*) FROM $TABLE_MEDIA a LEFT JOIN $TABLE_MESSAGES mm ON mm.id = a.message_id WHERE COALESCE(NULLIF(a.conversation_key,''), mm.conversation_key, '') = c.conversation_key) AS media_count,
+                    c.contact_name, c.contact_phone, c.contact_uri, c.shortcut_id, c.locus_id, c.last_sender,
+                    c.is_archived, c.is_pinned
+               FROM $TABLE_CONVERSATIONS c
+@@ -623,10 +814,10 @@
+             db.rawQuery("SELECT media_path FROM $TABLE_MESSAGES WHERE conversation_key = ? AND media_path IS NOT NULL", arrayOf(conversationKey)).use { c ->
+                 while (c.moveToNext()) c.getString(0)?.let(files::add)
+             }
+-            db.rawQuery("SELECT a.local_path FROM $TABLE_MEDIA a JOIN $TABLE_MESSAGES m ON m.id = a.message_id WHERE m.conversation_key = ?", arrayOf(conversationKey)).use { c ->
++            db.rawQuery("SELECT a.local_path FROM $TABLE_MEDIA a LEFT JOIN $TABLE_MESSAGES m ON m.id = a.message_id WHERE COALESCE(NULLIF(a.conversation_key,''), m.conversation_key, '') = ?", arrayOf(conversationKey)).use { c ->
+                 while (c.moveToNext()) c.getString(0)?.let(files::add)
+             }
+-            db.execSQL("DELETE FROM $TABLE_MEDIA WHERE message_id IN (SELECT id FROM $TABLE_MESSAGES WHERE conversation_key = ?)", arrayOf<Any?>(conversationKey))
++            db.execSQL("DELETE FROM $TABLE_MEDIA WHERE COALESCE(NULLIF(conversation_key,''), (SELECT m.conversation_key FROM $TABLE_MESSAGES m WHERE m.id = message_id), '') = ?", arrayOf<Any?>(conversationKey))
+             db.delete(TABLE_MESSAGES, "conversation_key = ?", arrayOf(conversationKey))
+             db.delete(TABLE_CONVERSATIONS, "conversation_key = ?", arrayOf(conversationKey))
+             db.setTransactionSuccessful()
+@@ -682,7 +873,7 @@
+                    c.is_group, c.contact_name, c.contact_phone, c.contact_uri, c.shortcut_id, c.locus_id,
+                    c.message_count,
+                    (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key=c.conversation_key AND m.is_deleted=1 AND m.is_system_summary=0),
+-                   (SELECT COUNT(*) FROM $TABLE_MESSAGES m WHERE m.conversation_key=c.conversation_key AND m.media_path IS NOT NULL AND m.is_system_summary=0)
++                   (SELECT COUNT(*) FROM $TABLE_MEDIA a LEFT JOIN $TABLE_MESSAGES mm ON mm.id = a.message_id WHERE COALESCE(NULLIF(a.conversation_key,''), mm.conversation_key, '') = c.conversation_key)
+               FROM $TABLE_CONVERSATIONS c WHERE c.conversation_key = ? LIMIT 1
+             """.trimIndent(),
+             arrayOf(conversationKey),
+@@ -726,19 +917,41 @@
+         return info + mapOf("participants" to participants)
+     }
+ 
+-    fun getMedia(): List<Map<String, Any?>> =
+-        readableDatabase.rawQuery(
++    fun getMedia(): List<Map<String, Any?>> = getMediaInternal(null, null, 4000)
++
++    fun getMediaForConversation(conversationKey: String, kind: String? = null): List<Map<String, Any?>> {
++        if (conversationKey.isBlank()) return emptyList()
++        return getMediaInternal(conversationKey, kind, 2500)
++    }
++
++    private fun getMediaInternal(conversationKey: String?, kind: String?, limit: Int): List<Map<String, Any?>> {
++        val where = mutableListOf<String>()
++        val args = mutableListOf<String>()
++        if (!conversationKey.isNullOrBlank()) {
++            where += "COALESCE(NULLIF(a.conversation_key,''), m.conversation_key, '') = ?"
++            args += conversationKey
++        }
++        if (!kind.isNullOrBlank() && kind != "all") {
++            val normalized = if (kind == "image") listOf("image", "gif") else listOf(kind)
++            where += "a.media_kind IN (${normalized.joinToString(",") { "?" }})"
++            args += normalized
++        }
++        val whereSql = if (where.isEmpty()) "" else "WHERE ${where.joinToString(" AND ")}"
++        return readableDatabase.rawQuery(
+             """
+             SELECT a.id, a.package_name, a.file_name, a.mime_type, a.local_path,
+                    a.captured_at, a.source_created_at, a.message_id,
+-                   COALESCE(m.conversation_key, ''), COALESCE(NULLIF(c.contact_name,''), c.title, '')
++                   COALESCE(NULLIF(a.conversation_key,''), m.conversation_key, ''),
++                   COALESCE(NULLIF(c.contact_name,''), c.title, ''),
++                   a.media_kind, a.link_confidence, a.link_source, a.file_size
+               FROM $TABLE_MEDIA a
+               LEFT JOIN $TABLE_MESSAGES m ON m.id = a.message_id
+-              LEFT JOIN $TABLE_CONVERSATIONS c ON c.conversation_key = m.conversation_key
+-             ORDER BY a.captured_at DESC
+-             LIMIT 2000
++              LEFT JOIN $TABLE_CONVERSATIONS c ON c.conversation_key = COALESCE(NULLIF(a.conversation_key,''), m.conversation_key)
++              $whereSql
++             ORDER BY a.source_created_at DESC, a.captured_at DESC
++             LIMIT ${limit.coerceIn(1, 5000)}
+             """.trimIndent(),
+-            null,
++            args.toTypedArray(),
+         ).use { cursor ->
+             buildList {
+                 while (cursor.moveToNext()) {
+@@ -754,11 +967,29 @@
+                             "messageId" to if (cursor.isNull(7)) null else cursor.getLong(7),
+                             "conversationKey" to cursor.getString(8),
+                             "conversationTitle" to cursor.getString(9),
++                            "mediaKind" to cursor.getString(10),
++                            "linkConfidence" to cursor.getDouble(11),
++                            "linkSource" to cursor.getString(12),
++                            "fileSize" to cursor.getLong(13),
+                         )
+                     )
+                 }
+             }
+         }
++    }
++
++    fun assignMediaToConversation(mediaId: Long, conversationKey: String): Boolean {
++        if (mediaId <= 0 || conversationKey.isBlank()) return false
++        val db = writableDatabase
++        val exists = db.rawQuery("SELECT 1 FROM $TABLE_CONVERSATIONS WHERE conversation_key = ? LIMIT 1", arrayOf(conversationKey)).use { it.moveToFirst() }
++        if (!exists) return false
++        db.execSQL(
++            "UPDATE $TABLE_MEDIA SET conversation_key = ?, link_confidence = 1.0, link_source = 'manual' WHERE id = ?",
++            arrayOf<Any?>(conversationKey, mediaId),
++        )
++        NativeEventBus.dataChanged(conversationKey, "media_manual_link")
++        return true
++    }
+ 
+     fun getStats(): Map<String, Any> {
+         val db = readableDatabase
+@@ -979,7 +1210,19 @@
+                             put("local_path", newPath)
+                             put("captured_at", capturedAt)
+                             put("source_created_at", cursor.longValue("source_created_at"))
+-                            if (mappedMessageId != null) put("message_id", mappedMessageId) else putNull("message_id")
++                            if (mappedMessageId != null) {
++                                put("message_id", mappedMessageId)
++                                val linkedKey = db.rawQuery("SELECT conversation_key FROM $TABLE_MESSAGES WHERE id = ? LIMIT 1", arrayOf(mappedMessageId.toString())).use { if (it.moveToFirst()) it.getString(0) else null }
++                                put("conversation_key", linkedKey)
++                                put("link_confidence", 1.0)
++                                put("link_source", "legacy_message")
++                            } else {
++                                putNull("message_id")
++                                put("link_confidence", 0.0)
++                                put("link_source", "legacy_unlinked")
++                            }
++                            put("media_kind", mimeToType(cursor.stringValue("mime_type")))
++                            put("file_size", runCatching { File(newPath).length() }.getOrDefault(0L))
+                             put("dedupe_hash", dedupe)
+                         }
+                         if (db.insertWithOnConflict(TABLE_MEDIA, null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L) mediaCount++
+diff -ruN '--exclude=.dart_tool' '--exclude=.idea' '--exclude=*.orig' '--exclude=pubspec.lock' source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt
+--- source_v52/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-09-01 17:50:01.000000000 +0000
++++ source_v53/android/app/src/main/kotlin/com/mographiccode/chatvault/MainActivity.kt	2026-09-01 18:03:17.047330097 +0000
+@@ -24,6 +24,7 @@
+     private val shareFileRequest = 7401
+     private val legacyDbRequest = 7402
+     private val voicePromptRequest = 7403
++    private val mediaTreeRequest = 7404
+     private var pendingMediaPermissionResult: MethodChannel.Result? = null
+     private var pendingContactsPermissionResult: MethodChannel.Result? = null
+     private var pendingShareResult: MethodChannel.Result? = null
+@@ -31,6 +32,7 @@
+     private var pendingShareMime: String = "*/*"
+     private var pendingLegacyImportResult: MethodChannel.Result? = null
+     private var pendingVoicePromptResult: MethodChannel.Result? = null
++    private var pendingMediaTreeResult: MethodChannel.Result? = null
+     private var eventSink: EventChannel.EventSink? = null
+     private lateinit var database: LocalMessageDatabase
+     private lateinit var gemini: GeminiManager
+@@ -77,9 +79,33 @@
+                     runOnUiThread { result.success(count) }
+                 }.start()
+                 "syncMedia" -> Thread {
+-                    val copied = runCatching { MediaCaptureManager(applicationContext).scanRecentMedia(500) }.getOrDefault(0)
++                    val copied = runCatching {
++                        val manager = MediaCaptureManager(applicationContext)
++                        manager.scanRecentMedia(500) + manager.scanPersistedTrees(2500)
++                    }.getOrDefault(0)
+                     runOnUiThread { result.success(copied) }
+                 }.start()
++                "hasWhatsAppMediaFolderAccess" -> result.success(MediaCaptureManager(applicationContext).hasPersistedTreeAccess())
++                "whatsAppMediaFolderCount" -> result.success(MediaCaptureManager(applicationContext).persistedTreeCount())
