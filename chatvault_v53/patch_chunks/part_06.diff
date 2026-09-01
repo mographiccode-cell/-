@@ -1,0 +1,302 @@
+   static Future<int> syncMedia() async =>
+       await _channel.invokeMethod<int>('syncMedia') ?? 0;
+ 
++  static Future<bool> hasWhatsAppMediaFolderAccess() async =>
++      await _channel.invokeMethod<bool>('hasWhatsAppMediaFolderAccess') ?? false;
++
++  static Future<int> whatsAppMediaFolderCount() async =>
++      await _channel.invokeMethod<int>('whatsAppMediaFolderCount') ?? 0;
++
++  static Future<Map<String, dynamic>> chooseWhatsAppMediaFolder() async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('chooseWhatsAppMediaFolder') ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
++  static Future<Map<String, dynamic>> syncWhatsAppMedia({int limitPerKind = 600, int maxFolderFiles = 5000}) async {
++    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('syncWhatsAppMedia', <String, dynamic>{
++          'limitPerKind': limitPerKind,
++          'maxFolderFiles': maxFolderFiles,
++        }) ?? const <dynamic, dynamic>{};
++    return Map<String, dynamic>.from(raw);
++  }
++
+   static Future<List<Conversation>> getConversations({String query = '', bool archivedOnly = false}) async {
+     final raw = await _channel.invokeMethod<List<dynamic>>(
+           'getConversations',
+@@ -199,6 +218,20 @@
+         .toList();
+   }
+ 
++  static Future<List<ArchivedMedia>> getConversationMedia(String conversationKey, {String kind = 'all'}) async {
++    final raw = await _channel.invokeMethod<List<dynamic>>('getConversationMedia', <String, dynamic>{
++          'conversationKey': conversationKey,
++          'kind': kind,
++        }) ?? <dynamic>[];
++    return raw.map((item) => ArchivedMedia.fromMap(Map<String, dynamic>.from(item as Map))).toList();
++  }
++
++  static Future<bool> assignMediaToConversation(int mediaId, String conversationKey) async =>
++      await _channel.invokeMethod<bool>('assignMediaToConversation', <String, dynamic>{
++        'mediaId': mediaId,
++        'conversationKey': conversationKey,
++      }) ?? false;
++
+   static Future<AppStats> getStats() async {
+     final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>('getStats') ?? const {};
+     return AppStats.fromMap(Map<String, dynamic>.from(raw));
+@@ -527,7 +560,14 @@
+     required this.mimeType,
+     required this.localPath,
+     required this.capturedAt,
++    required this.sourceCreatedAt,
++    required this.conversationKey,
+     required this.conversationTitle,
++    required this.mediaKind,
++    required this.linkConfidence,
++    required this.linkSource,
++    required this.fileSize,
++    required this.messageId,
+   });
+ 
+   final int id;
+@@ -535,22 +575,48 @@
+   final String? mimeType;
+   final String localPath;
+   final int capturedAt;
++  final int sourceCreatedAt;
++  final String conversationKey;
+   final String conversationTitle;
+-
+-  bool get isImage => mimeType?.startsWith('image/') == true;
+-  bool get isVideo => mimeType?.startsWith('video/') == true;
+-  bool get isAudio => mimeType?.startsWith('audio/') == true;
++  final String mediaKind;
++  final double linkConfidence;
++  final String linkSource;
++  final int fileSize;
++  final int? messageId;
++
++  bool get isImage => mediaKind == 'image' || mediaKind == 'gif' || mimeType?.startsWith('image/') == true;
++  bool get isVideo => mediaKind == 'video' || mimeType?.startsWith('video/') == true;
++  bool get isAudio => mediaKind == 'audio' || mimeType?.startsWith('audio/') == true;
++  bool get isDocument => !isImage && !isVideo && !isAudio;
++  bool get isLinked => conversationKey.isNotEmpty;
++  int get displayTime => sourceCreatedAt > 0 ? sourceCreatedAt : capturedAt;
+ 
+   factory ArchivedMedia.fromMap(Map<String, dynamic> map) => ArchivedMedia(
+         id: _int(map['id']),
+         fileName: map['fileName']?.toString() ?? 'وسائط',
+-        mimeType: map['mimeType']?.toString(),
++        mimeType: _nullableText(map['mimeType']),
+         localPath: map['localPath']?.toString() ?? '',
+         capturedAt: _int(map['capturedAt']),
++        sourceCreatedAt: _int(map['sourceCreatedAt']),
++        conversationKey: map['conversationKey']?.toString() ?? '',
+         conversationTitle: map['conversationTitle']?.toString() ?? '',
++        mediaKind: map['mediaKind']?.toString() ?? _mediaKindFromMime(map['mimeType']?.toString()),
++        linkConfidence: (map['linkConfidence'] as num?)?.toDouble() ?? 0,
++        linkSource: map['linkSource']?.toString() ?? 'unlinked',
++        fileSize: _int(map['fileSize']),
++        messageId: map['messageId'] == null ? null : _int(map['messageId']),
+       );
+ }
+ 
++String _mediaKindFromMime(String? mime) {
++  final value = mime?.toLowerCase() ?? '';
++  if (value.startsWith('image/gif')) return 'gif';
++  if (value.startsWith('image/')) return 'image';
++  if (value.startsWith('video/')) return 'video';
++  if (value.startsWith('audio/')) return 'audio';
++  return 'document';
++}
++
+ class SenderStat {
+   const SenderStat(this.name, this.count);
+   final String name;
+@@ -654,6 +720,37 @@
+   return false;
+ }
+ 
++Future<bool> _ensureWhatsAppFolderAccess(BuildContext context, {bool optional = true}) async {
++  if (await NativeBridge.hasWhatsAppMediaFolderAccess()) return true;
++  if (!context.mounted) return false;
++  final approved = await showDialog<bool>(
++    context: context,
++    builder: (dialogContext) => AlertDialog(
++      icon: const Icon(Icons.folder_copy_rounded, color: _accent, size: 34),
++      title: const Text('ربط مجلد WhatsApp Media'),
++      content: const Text(
++        'لإظهار ملفات PDF والمستندات وVoice Notes داخل المحادثات، اختر مرة واحدة مجلد WhatsApp/Media من منتقي Android. يحتفظ Android بصلاحية القراءة للمجلد الذي اخترته فقط، ولا يحتاج ChatVault إلى صلاحية إدارة كل الملفات.',
++        style: TextStyle(height: 1.55),
++      ),
++      actions: [
++        if (optional) TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('الوسائط العامة فقط')),
++        FilledButton.icon(
++          onPressed: () => Navigator.pop(dialogContext, true),
++          icon: const Icon(Icons.folder_open_rounded),
++          label: const Text('اختيار المجلد'),
++        ),
++      ],
++    ),
++  );
++  if (approved != true) return false;
++  final report = await NativeBridge.chooseWhatsAppMediaFolder();
++  final success = report['success'] == true;
++  if (!success && context.mounted && report['cancelled'] != true) {
++    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(report['error']?.toString() ?? 'تعذر حفظ صلاحية مجلد واتساب.')));
++  }
++  return success;
++}
++
+ Future<bool> _ensureContactsAccess(BuildContext context) async {
+   if (await NativeBridge.hasContactsPermission()) return true;
+   if (!context.mounted) return false;
+@@ -1249,6 +1346,10 @@
+   bool _loading = true;
+   bool _canReply = false;
+   bool _sending = false;
++  bool _showingMedia = false;
++  bool _mediaSyncing = false;
++  String _mediaFilter = 'all';
++  List<ArchivedMedia>? _conversationMedia;
+   StreamSubscription<Map<String, dynamic>>? _events;
+   Timer? _liveDebounce;
+ 
+@@ -1263,8 +1364,12 @@
+       if (event['type'] != 'data_changed') return;
+       final key = event['conversationKey']?.toString();
+       if (key != null && key.isNotEmpty && key != widget.conversation.key) return;
++      final reason = event['reason']?.toString() ?? '';
+       _liveDebounce?.cancel();
+-      _liveDebounce = Timer(const Duration(milliseconds: 90), () => _load(silent: true));
++      _liveDebounce = Timer(const Duration(milliseconds: 90), () {
++        _load(silent: true);
++        if (_conversationMedia != null || reason.contains('media')) _loadConversationMedia(silent: true);
++      });
+     });
+     _load();
+   }
+@@ -1297,6 +1402,55 @@
+     });
+   }
+ 
++  Future<void> _loadConversationMedia({bool silent = false}) async {
++    if (!silent && mounted) setState(() => _conversationMedia = null);
++    final items = await NativeBridge.getConversationMedia(widget.conversation.key);
++    if (!mounted) return;
++    setState(() => _conversationMedia = items);
++  }
++
++  Future<void> _setMediaView(bool enabled) async {
++    if (_showingMedia == enabled) return;
++    setState(() {
++      _showingMedia = enabled;
++      if (enabled) _searching = false;
++    });
++    if (enabled && _conversationMedia == null) await _loadConversationMedia();
++  }
++
++  Future<void> _syncConversationMedia() async {
++    if (_mediaSyncing) return;
++    setState(() => _mediaSyncing = true);
++    try {
++      var mediaAllowed = await NativeBridge.hasMediaPermissions();
++      if (!mediaAllowed && mounted) mediaAllowed = await _ensureMediaAccess(context);
++      var folderAllowed = await NativeBridge.hasWhatsAppMediaFolderAccess();
++      if (!folderAllowed && mounted) folderAllowed = await _ensureWhatsAppFolderAccess(context, optional: true);
++      if (!mediaAllowed && !folderAllowed) {
++        if (mounted) {
++          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('يلزم السماح بالوسائط أو ربط مجلد WhatsApp Media للمزامنة.')));
++        }
++        return;
++      }
++      final report = await NativeBridge.syncWhatsAppMedia(limitPerKind: 800, maxFolderFiles: 6000);
++      await _loadConversationMedia(silent: true);
++      await _load(silent: true);
++      if (!mounted) return;
++      final added = _int(report['totalAdded']);
++      final relinked = _int(report['relinked']);
++      final error = report['error']?.toString();
++      ScaffoldMessenger.of(context).showSnackBar(
++        SnackBar(
++          content: Text(error?.isNotEmpty == true
++              ? error!
++              : 'اكتملت المزامنة: $added ملف جديد، وربط $relinked ملف بمحادثاته.'),
++        ),
++      );
++    } finally {
++      if (mounted) setState(() => _mediaSyncing = false);
++    }
++  }
++
+   Future<void> _send() async {
+     final text = _controller.text.trim();
+     if (text.isEmpty || !_canReply || _sending) return;
+@@ -1599,18 +1753,25 @@
+         ),
+         actions: [
+           if (!_searching) IconButton(onPressed: _showGeminiAnalysis, icon: const Icon(Icons.auto_awesome_rounded), tooltip: 'تحليل بـ Gemini'),
+-          IconButton(
+-            onPressed: () => setState(() { _searching = !_searching; if (!_searching) _chatSearch.clear(); }),
+-            icon: Icon(_searching ? Icons.close_rounded : Icons.search_rounded),
+-            tooltip: _searching ? 'إغلاق البحث' : 'بحث داخل المحادثة',
+-          ),
++          if (!_searching)
++            IconButton(
++              onPressed: () => _setMediaView(!_showingMedia),
++              icon: Icon(_showingMedia ? Icons.chat_bubble_outline_rounded : Icons.photo_library_outlined),
++              tooltip: _showingMedia ? 'عرض الرسائل' : 'وسائط المحادثة',
++            ),
++          if (!_showingMedia)
++            IconButton(
++              onPressed: () => setState(() { _searching = !_searching; if (!_searching) _chatSearch.clear(); }),
++              icon: Icon(_searching ? Icons.close_rounded : Icons.search_rounded),
++              tooltip: _searching ? 'إغلاق البحث' : 'بحث داخل المحادثة',
++            ),
+           if (!_searching) IconButton(onPressed: () => _showConversationDetails(context, widget.conversation), icon: const Icon(Icons.info_outline_rounded), tooltip: 'تفاصيل المحادثة'),
+-          IconButton(onPressed: () => _load(), icon: const Icon(Icons.refresh_rounded)),
++          IconButton(onPressed: () => _showingMedia ? _loadConversationMedia() : _load(), icon: const Icon(Icons.refresh_rounded)),
+         ],
+       ),
+       body: Column(
+         children: [
+-          if (!_canReply)
++          if (!_showingMedia && !_canReply)
+             Container(
+               width: double.infinity,
+               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+@@ -1621,7 +1782,14 @@
+                 style: TextStyle(color: _muted, fontSize: 11),
+               ),
+             ),
+-          if (_searching && searchQuery.isNotEmpty)
++          if (!_searching)
++            _ChatSectionSelector(
++              showingMedia: _showingMedia,
++              mediaCount: _conversationMedia?.length ?? widget.conversation.mediaCount,
++              onMessages: () => _setMediaView(false),
++              onMedia: () => _setMediaView(true),
++            ),
++          if (!_showingMedia && _searching && searchQuery.isNotEmpty)
+             Container(
+               width: double.infinity,
+               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+@@ -1629,9 +1797,17 @@
+               child: Text('نتائج البحث: ${visibleMessages.length}', style: const TextStyle(color: _accent, fontWeight: FontWeight.w700, fontSize: 11.5)),
+             ),
+           Expanded(
+-            child: _loading
+-                ? const Center(child: CircularProgressIndicator())
+-                : visibleMessages.isEmpty
++            child: _showingMedia
++                ? _ConversationMediaPane(
++                    items: _conversationMedia,
++                    filter: _mediaFilter,
++                    syncing: _mediaSyncing,
++                    onFilterChanged: (value) => setState(() => _mediaFilter = value),
++                    onSync: _syncConversationMedia,
++                  )
++                : _loading
++                    ? const Center(child: CircularProgressIndicator())
++                    : visibleMessages.isEmpty
+                     ? _EmptyState(
