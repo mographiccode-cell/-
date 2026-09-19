@@ -5,5 +5,5 @@
   "actual_training": true,
   "synthetic_data_used": false,
   "history_window": 12,
-  "model_size_bytes": 3504
+  "model_size_bytes": 3500
 }
