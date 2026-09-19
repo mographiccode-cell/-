@@ -140,8 +140,12 @@ def chronological_split(df):
 
 def regression_metrics(model, df, xcols, ycols):
     if len(df)==0: return {}
-    yp=model.predict(df[xcols])
-    yt=df[ycols].to_numpy()
+    yp=np.asarray(model.predict(df[xcols]))
+    yt=np.asarray(df[ycols].to_numpy())
+    if yp.ndim == 1:
+        yp = yp.reshape(-1, 1)
+    if yt.ndim == 1:
+        yt = yt.reshape(-1, 1)
     out={}
     for i,y in enumerate(ycols):
         out[y]={
