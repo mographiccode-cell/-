@@ -237,6 +237,28 @@ ttr,tv,tt=split_time(through)
 through_model=Pipeline([("scale",StandardScaler()),("ridge",Ridge(alpha=1.0))])
 through_model.fit(ttr[TX],ttr[TY])
 
+# True chronological learning curves: progressively increase the amount of
+# training history while keeping validation fixed.
+def ridge_learning_curve(train_df, val_df, xcols, ycols):
+    rows=[]
+    for frac in [0.20,0.40,0.60,0.80,1.00]:
+        n=max(20,int(len(train_df)*frac))
+        sub=train_df.iloc[:n]
+        mdl=Pipeline([("scale",StandardScaler()),("ridge",Ridge(alpha=1.0))])
+        mdl.fit(sub[xcols],sub[ycols])
+        tr=metrics_reg(mdl,sub,xcols,ycols)
+        va=metrics_reg(mdl,val_df,xcols,ycols)
+        rows.append({
+            "fraction":frac,
+            "train_examples":int(n),
+            "train":tr,
+            "validation":va
+        })
+    return rows
+
+performance_learning_curve=ridge_learning_curve(ptr,pv,PX,PY)
+throughput_learning_curve=ridge_learning_curve(ttr,tv,TX,TY)
+
 # Project-specific path availability classifier.
 # Build the next-cycle presence label, then 12-step lag features.
 pbase=prober.sort_values(["lab","destination","fingerprint","timestamp"]).copy()
@@ -341,6 +363,10 @@ metrics={
         "train":metrics_reg(through_model,ttr,TX,TY),
         "validation":metrics_reg(through_model,tv,TX,TY),
         "test":metrics_reg(through_model,tt,TX,TY)
+    },
+    "learning_curves":{
+        "performance":performance_learning_curve,
+        "throughput":throughput_learning_curve
     },
     "path_availability_classifier":classifier_metrics,
     "model_file_bytes":model_path.stat().st_size
