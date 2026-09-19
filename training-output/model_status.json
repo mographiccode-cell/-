@@ -1,0 +1,8 @@
+{
+  "trained": true,
+  "model": "path_performance_model.joblib",
+  "source": "ScionPathML official raw data",
+  "actual_training": true,
+  "synthetic_data_used": false,
+  "model_size_bytes": 1375
+}
