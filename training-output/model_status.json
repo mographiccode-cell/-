@@ -4,5 +4,6 @@
   "source": "ScionPathML official raw data",
   "actual_training": true,
   "synthetic_data_used": false,
-  "model_size_bytes": 1375
+  "history_window": 12,
+  "model_size_bytes": 3504
 }
