@@ -1,0 +1,14 @@
+name: projectdesk_recovery
+description: ProjectDesk legacy recovery utility
+publish_to: "none"
+version: 1.3.0+13
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
