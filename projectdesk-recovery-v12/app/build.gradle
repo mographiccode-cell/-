@@ -1,0 +1,30 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.mographikod.projectdesk.recoveryv12"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.mographikod.projectdesk.recoveryv12"
+        minSdk 23
+        targetSdk 35
+        versionCode 12
+        versionName "1.2.0"
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
