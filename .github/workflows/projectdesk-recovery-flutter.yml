@@ -1,0 +1,92 @@
+name: Build Full ProjectDesk Recovery Flutter APK
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'projectdesk-recovery-flutter/**'
+      - '.github/workflows/projectdesk-recovery-flutter.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.0'
+          channel: stable
+          cache: true
+
+      - name: Create Flutter Android scaffold
+        run: |
+          rm -rf projectdesk-recovery-flutter/build_app
+          flutter create projectdesk-recovery-flutter/build_app \
+            --platforms=android \
+            --org com.mographikod \
+            --project-name projectdesk_recovery \
+            --empty
+          cp projectdesk-recovery-flutter/source/pubspec.yaml projectdesk-recovery-flutter/build_app/pubspec.yaml
+          cp projectdesk-recovery-flutter/source/lib/main.dart projectdesk-recovery-flutter/build_app/lib/main.dart
+
+      - name: Install native recovery bridge
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('projectdesk-recovery-flutter/build_app/android/app/build.gradle.kts')
+          s = p.read_text()
+          s = s.replace('com.mographikod.projectdesk_recovery', 'com.mographikod.projectdesk.recovery')
+          p.write_text(s)
+          PY
+
+          find projectdesk-recovery-flutter/build_app/android/app/src/main/kotlin -name MainActivity.kt -delete || true
+          mkdir -p projectdesk-recovery-flutter/build_app/android/app/src/main/kotlin/com/mographikod/projectdesk/recovery
+          mkdir -p projectdesk-recovery-flutter/build_app/android/app/src/main/java/com/mographikod/projectdesk/recovery
+          mkdir -p projectdesk-recovery-flutter/build_app/android/app/src/main/res/xml
+          mkdir -p projectdesk-recovery-flutter/build_app/android/app/src/main/res/values
+
+          cp projectdesk-recovery-flutter/source/android/MainActivity.kt \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/kotlin/com/mographikod/projectdesk/recovery/MainActivity.kt
+          cp projectdesk-recovery-flutter/source/android/RecoveryAccessibilityService.java \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/java/com/mographikod/projectdesk/recovery/RecoveryAccessibilityService.java
+          cp projectdesk-recovery-flutter/source/android/BackupWriter.java \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/java/com/mographikod/projectdesk/recovery/BackupWriter.java
+          cp projectdesk-recovery-flutter/source/android/AndroidManifest.xml \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/AndroidManifest.xml
+          cp projectdesk-recovery-flutter/source/android/accessibility_service.xml \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/res/xml/accessibility_service.xml
+          cp projectdesk-recovery-flutter/source/android/strings_extra.xml \
+             projectdesk-recovery-flutter/build_app/android/app/src/main/res/values/recovery_strings.xml
+
+      - name: Analyze and build
+        working-directory: projectdesk-recovery-flutter/build_app
+        run: |
+          flutter pub get
+          dart format --set-exit-if-changed lib/main.dart
+          flutter analyze
+          flutter build apk --release
+          flutter build apk --debug
+
+      - name: Collect APKs
+        run: |
+          mkdir -p projectdesk-recovery-flutter/dist
+          cp projectdesk-recovery-flutter/build_app/build/app/outputs/flutter-apk/app-release.apk \
+             projectdesk-recovery-flutter/dist/ProjectDesk-Recovery-v1.3.0-Full-Release.apk
+          cp projectdesk-recovery-flutter/build_app/build/app/outputs/flutter-apk/app-debug.apk \
+             projectdesk-recovery-flutter/dist/ProjectDesk-Recovery-v1.3.0-Full-Debug.apk
+          ls -lh projectdesk-recovery-flutter/dist/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ProjectDesk-Recovery-v1.3.0-Full
+          path: projectdesk-recovery-flutter/dist/*.apk
+          if-no-files-found: error
+          retention-days: 14
