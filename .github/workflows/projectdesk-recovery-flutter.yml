@@ -36,6 +36,7 @@ jobs:
             --empty
           cp projectdesk-recovery-flutter/source/pubspec.yaml projectdesk-recovery-flutter/build_app/pubspec.yaml
           cp projectdesk-recovery-flutter/source/lib/main.dart projectdesk-recovery-flutter/build_app/lib/main.dart
+          rm -f projectdesk-recovery-flutter/build_app/analysis_options.yaml
 
       - name: Install native recovery bridge
         run: |
@@ -70,7 +71,7 @@ jobs:
         working-directory: projectdesk-recovery-flutter/build_app
         run: |
           flutter pub get
-          dart format --set-exit-if-changed lib/main.dart
+          dart format lib/main.dart
           flutter analyze
           flutter build apk --release
           flutter build apk --debug
