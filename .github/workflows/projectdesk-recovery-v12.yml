@@ -1,9 +1,12 @@
 name: Build ProjectDesk Recovery v1.2
 
 on:
-  push:
+  pull_request:
     branches:
-      - projectdesk-recovery-v12
+      - main
+    paths:
+      - 'projectdesk-recovery-v12/**'
+      - '.github/workflows/projectdesk-recovery-v12.yml'
   workflow_dispatch:
 
 jobs:
