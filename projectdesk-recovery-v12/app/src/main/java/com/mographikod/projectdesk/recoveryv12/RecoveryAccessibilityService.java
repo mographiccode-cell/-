@@ -255,13 +255,31 @@ public class RecoveryAccessibilityService extends AccessibilityService {
 
         String title = extractLabeled(lines,
                 "عنوان المشروع", "اسم المشروع", "project title", "project name");
+
+        // Legacy ProjectDesk cards put the project title first. Do not reject a title
+        // merely because the project itself contains words such as "جامعة".
+        if (TextUtils.isEmpty(title)) {
+            for (String line : lines) {
+                if (isGeneric(line) || looksLikeStudentLabel(line) || looksLikeStatus(line)) continue;
+                String candidateTitle = stripLabel(line, "المشروع", "project");
+                if (!TextUtils.isEmpty(candidateTitle)) {
+                    title = candidateTitle;
+                    break;
+                }
+            }
+        }
+
         String student = extractLabeled(lines,
                 "اسم الطالب", "الطالب", "student name", "student");
         String university = extractLabeled(lines,
                 "اسم الجامعة", "الجامعة", "university");
 
+        // When there is no explicit label, the university is normally the last
+        // university-looking line in the card, after title/student.
         if (TextUtils.isEmpty(university)) {
-            for (String line : lines) {
+            for (int i = lines.size() - 1; i >= 0; i--) {
+                String line = lines.get(i);
+                if (sameNormalized(line, title)) continue;
                 if (looksLikeUniversity(line)) {
                     university = stripLabel(line, "الجامعة", "اسم الجامعة", "university");
                     if (TextUtils.isEmpty(university)) university = line;
@@ -270,23 +288,18 @@ public class RecoveryAccessibilityService extends AccessibilityService {
             }
         }
 
-        if (TextUtils.isEmpty(title)) {
-            for (String line : lines) {
-                if (isGeneric(line) || looksLikeUniversity(line) || looksLikeStudentLabel(line)
-                        || looksLikeStatus(line)) continue;
-                title = stripLabel(line, "المشروع", "project");
-                if (!TextUtils.isEmpty(title)) break;
-            }
-        }
-
         if (TextUtils.isEmpty(student)) {
             boolean passedTitle = false;
             for (String line : lines) {
                 if (!passedTitle) {
-                    if (sameNormalized(line, title) || line.contains(title)) passedTitle = true;
+                    if (sameNormalized(stripLabel(line, "المشروع", "project"), title)
+                            || sameNormalized(line, title)) {
+                        passedTitle = true;
+                    }
                     continue;
                 }
-                if (looksLikeUniversity(line) || isGeneric(line) || looksLikeStatus(line)) continue;
+                if (sameNormalized(line, university) || looksLikeUniversity(line)
+                        || isGeneric(line) || looksLikeStatus(line)) continue;
                 String possible = stripLabel(line, "الطالب", "اسم الطالب", "student", "student name");
                 if (!TextUtils.isEmpty(possible) && !sameNormalized(possible, title)) {
                     student = possible;
@@ -299,8 +312,6 @@ public class RecoveryAccessibilityService extends AccessibilityService {
         student = safe(student);
         university = safe(university);
 
-        // A real old ProjectDesk card normally contains title + student + university.
-        // Requiring university/student context prevents dashboard/menu elements from becoming fake projects.
         boolean hasIdentityContext = !student.isEmpty() && !university.isEmpty();
         boolean hasUniversityContext = !university.isEmpty() && lines.size() >= 3;
         if (title.length() < 3 || (!hasIdentityContext && !hasUniversityContext)) return null;
