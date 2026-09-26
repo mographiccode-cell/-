@@ -7,7 +7,7 @@
 
     <application
         android:label="ProjectDesk Recovery"
-        android:name="\${applicationName}"
+        android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:supportsRtl="true">
         <activity
