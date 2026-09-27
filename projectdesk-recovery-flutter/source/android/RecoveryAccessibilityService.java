@@ -651,6 +651,7 @@ public class RecoveryAccessibilityService extends AccessibilityService {
     private static boolean looksLikeUniversity(String s) {
         String n = normalize(s);
         return n.startsWith("الجامعة")
+                || n.startsWith("جامعة")
                 || n.startsWith("اسم الجامعة")
                 || n.contains(" university")
                 || n.startsWith("university")
@@ -724,8 +725,7 @@ public class RecoveryAccessibilityService extends AccessibilityService {
 
         String fingerprint() {
             return normalize(title)
-                    + "|" + normalize(student)
-                    + "|" + normalize(university);
+                    + "|" + normalize(student);
         }
 
         JSONObject toJson() {
