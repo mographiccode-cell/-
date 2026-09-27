@@ -46,6 +46,9 @@ class _RecoveryHomeState extends State<RecoveryHome> {
   int get _count => (_state['project_count'] as num?)?.toInt() ?? 0;
   bool get _active => _state['active'] == true;
   bool get _serviceEnabled => _state['service_enabled'] == true;
+  bool get _folderSelected => _state['backup_folder_set'] == true;
+  int get _scrollSteps => (_state['scroll_steps'] as num?)?.toInt() ?? 0;
+  String get _folderLabel => (_state['backup_folder_label'] ?? '').toString().trim();
   String get _status => (_state['status'] ?? 'لم يبدأ الاسترجاع بعد.').toString();
   List<dynamic> get _projects => (_state['projects'] as List<dynamic>?) ?? const [];
 
@@ -79,8 +82,12 @@ class _RecoveryHomeState extends State<RecoveryHome> {
     }
   }
 
+  Future<void> _chooseFolder() async {
+    await _invoke('selectBackupFolder');
+  }
+
   Future<void> _createBackup() async {
-    if (_count <= 0 || _active || _busy) return;
+    if (_count <= 0 || _active || _busy || !_folderSelected) return;
     setState(() {
       _busy = true;
       _message = 'جارٍ إنشاء قاعدة SQLite والتحقق منها…';
@@ -91,7 +98,7 @@ class _RecoveryHomeState extends State<RecoveryHome> {
       final count = result['project_count'] ?? 0;
       final file = result['file_name'] ?? '';
       setState(() => _message =
-          'تم إنشاء نسخة صحيحة تحتوي على $count مشروع.\n$file\nDownloads/ProjectDesk Recovery');
+          'تم إنشاء نسخة صحيحة تحتوي على $count مشروع.\n$file\nتم الحفظ داخل المجلد الذي اخترته.');
       _show('تم حفظ ملف الاستعادة بنجاح.');
     } on PlatformException catch (e) {
       setState(() => _message = e.message ?? 'فشل إنشاء النسخة.');
@@ -134,7 +141,7 @@ class _RecoveryHomeState extends State<RecoveryHome> {
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
-        title: const Text('ProjectDesk Recovery'),
+        title: const Text('ProjectDesk Recovery 1.4'),
         backgroundColor: const Color(0xFFF1DDD7),
       ),
       body: SafeArea(
@@ -170,11 +177,11 @@ class _RecoveryHomeState extends State<RecoveryHome> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('2. اكتشاف المشاريع القديمة',
+                  const Text('2. اكتشاف جميع المشاريع القديمة',
                       style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 10),
                   const Text(
-                    'سيتم فتح ProjectDesk القديم وقراءة بطاقات المشاريع كما تظهر: عنوان المشروع، الطالب، والجامعة، ثم تمرير القائمة حتى النهاية.',
+                    'هذه النسخة لا تتوقف عند أول شاشة. ستقرأ بطاقات المشاريع ثم تمرر القائمة تلقائيًا حتى تتأكد من الوصول إلى نهايتها.',
                     style: TextStyle(height: 1.7),
                   ),
                   const SizedBox(height: 14),
@@ -183,13 +190,18 @@ class _RecoveryHomeState extends State<RecoveryHome> {
                         ? () => _invoke('startRecovery')
                         : null,
                     icon: const Icon(Icons.play_arrow_rounded),
-                    label: const Text('بدء الاسترجاع'),
+                    label: const Text('بدء المسح الكامل'),
                   ),
                   const SizedBox(height: 14),
                   Text(_status, style: const TextStyle(fontWeight: FontWeight.w700)),
                   const SizedBox(height: 6),
                   Text('عدد المشاريع المكتشفة: $_count',
                       style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  if (_active || _scrollSteps > 0) ...[
+                    const SizedBox(height: 4),
+                    Text('خطوات التمرير: $_scrollSteps',
+                        style: const TextStyle(color: Colors.black54)),
+                  ],
                 ],
               ),
             ),
@@ -225,22 +237,58 @@ class _RecoveryHomeState extends State<RecoveryHome> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('3. إنشاء ملف الاستعادة',
+                  const Text('3. اختيار مجلد الحفظ',
                       style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
                   const SizedBox(height: 10),
                   const Text(
-                    'لن يسمح التطبيق بإنشاء Backup إذا كان عدد المشاريع صفرًا. قبل الحفظ يتم فتح قاعدة project_organizer.db وعدّ السجلات فعليًا للتأكد أنها ليست فارغة.',
+                    'اختر بنفسك المجلد الذي تريد وضع ملف الاستعادة داخله. يفضل Download أو Documents.',
+                    style: TextStyle(height: 1.7),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: _busy ? null : _chooseFolder,
+                    icon: const Icon(Icons.folder_open_rounded),
+                    label: Text(_folderSelected ? 'تغيير مجلد الحفظ' : 'اختيار مجلد الحفظ'),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    _folderSelected
+                        ? '✓ تم تحديد مجلد للحفظ'
+                        : 'لم يتم تحديد مجلد بعد.',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: _folderSelected ? Colors.green.shade800 : Colors.red.shade700,
+                    ),
+                  ),
+                  if (_folderSelected && _folderLabel.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text('المجلد: $_folderLabel'),
+                  ],
+                ],
+              ),
+            ),
+            _card(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('4. إنشاء ملف الاستعادة',
+                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'لن يتم إنشاء الملف إلا بعد اكتشاف مشروع واحد على الأقل واختيار مجلد الحفظ. قبل الحفظ يتم التحقق من عدد السجلات داخل project_organizer.db ومن محتويات ملف .pobackup.',
                     style: TextStyle(height: 1.7),
                   ),
                   const SizedBox(height: 14),
                   FilledButton.icon(
-                    onPressed: (_count > 0 && !_active && !_busy) ? _createBackup : null,
+                    onPressed: (_count > 0 && !_active && !_busy && _folderSelected)
+                        ? _createBackup
+                        : null,
                     icon: _busy
                         ? const SizedBox.square(
                             dimension: 18,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.download_rounded),
+                        : const Icon(Icons.save_alt_rounded),
                     label: const Text('إنشاء وحفظ نسخة .pobackup'),
                   ),
                   if (_message.isNotEmpty) ...[
