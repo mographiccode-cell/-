@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ProjectDesk Recovery 1.2</string>
+    <string name="accessibility_desc">يقرأ هذا المكوّن بيانات ProjectDesk القديم فقط أثناء عملية الاسترجاع وبطلب المستخدم.</string>
+</resources>
