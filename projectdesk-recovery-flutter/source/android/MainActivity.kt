@@ -1,20 +1,25 @@
 package com.mographikod.projectdesk.recovery
 
-import android.Manifest
+import android.app.Activity
 import android.content.ComponentName
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
+import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONArray
-import org.json.JSONObject
 import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        private const val PICK_BACKUP_FOLDER = 9104
+        private const val KEY_BACKUP_TREE_URI = "backup_tree_uri"
+        private const val KEY_BACKUP_FOLDER_LABEL = "backup_folder_label"
+    }
+
     private val channelName = "projectdesk.recovery/control"
     private val io = Executors.newSingleThreadExecutor()
 
@@ -30,6 +35,7 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "startRecovery" -> startRecovery(result)
+                    "selectBackupFolder" -> selectBackupFolder(result)
                     "createBackup" -> createBackup(result)
                     else -> result.notImplemented()
                 }
@@ -39,6 +45,7 @@ class MainActivity : FlutterActivity() {
     private fun getState(): Map<String, Any?> {
         val sp = getSharedPreferences(RecoveryAccessibilityService.PREFS, MODE_PRIVATE)
         val projects = mutableListOf<Map<String, Any?>>()
+
         try {
             val arr = JSONArray(sp.getString("projects_json", "[]"))
             for (i in 0 until arr.length()) {
@@ -53,6 +60,8 @@ class MainActivity : FlutterActivity() {
             }
         } catch (_: Exception) {}
 
+        val folderUri = sp.getString(KEY_BACKUP_TREE_URI, "") ?: ""
+
         return mapOf(
             "service_enabled" to isRecoveryServiceEnabled(),
             "active" to sp.getBoolean("active", false),
@@ -61,7 +70,12 @@ class MainActivity : FlutterActivity() {
             "status" to sp.getString("status", "لم يبدأ الاسترجاع بعد."),
             "project_count" to sp.getInt("project_count", projects.size),
             "projects" to projects,
-            "visible_text_count" to sp.getInt("visible_text_count", 0)
+            "visible_text_count" to sp.getInt("visible_text_count", 0),
+            "scroll_steps" to sp.getInt("scroll_steps", 0),
+            "backup_folder_set" to folderUri.isNotBlank(),
+            "backup_folder_label" to (
+                sp.getString(KEY_BACKUP_FOLDER_LABEL, "") ?: ""
+            )
         )
     }
 
@@ -75,7 +89,9 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        val launch = packageManager.getLaunchIntentForPackage(RecoveryAccessibilityService.TARGET_PACKAGE)
+        val launch = packageManager.getLaunchIntentForPackage(
+            RecoveryAccessibilityService.TARGET_PACKAGE
+        )
         if (launch == null) {
             result.error(
                 "LEGACY_NOT_FOUND",
@@ -90,6 +106,7 @@ class MainActivity : FlutterActivity() {
             .putString("projects_json", "[]")
             .putInt("project_count", 0)
             .putInt("visible_text_count", 0)
+            .putInt("scroll_steps", 0)
             .putString("last_snapshot", "")
             .putString("status", "جارٍ فتح ProjectDesk القديم…")
             .putString("session_id", System.currentTimeMillis().toString())
@@ -103,14 +120,65 @@ class MainActivity : FlutterActivity() {
         result.success(true)
     }
 
+    private fun selectBackupFolder(result: MethodChannel.Result) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            )
+        }
+
+        startActivityForResult(intent, PICK_BACKUP_FOLDER)
+        result.success(true)
+    }
+
+    @Deprecated("Deprecated in Android API, retained for broad device compatibility.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode != PICK_BACKUP_FOLDER || resultCode != Activity.RESULT_OK) return
+
+        val uri = data?.data ?: return
+        val flags = data.flags and
+            (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+
+        try {
+            contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (_: SecurityException) {
+            // Some file providers grant usable access for the current app without persistence.
+        }
+
+        getSharedPreferences(RecoveryAccessibilityService.PREFS, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_BACKUP_TREE_URI, uri.toString())
+            .putString(KEY_BACKUP_FOLDER_LABEL, readableFolderName(uri))
+            .apply()
+    }
+
+    private fun readableFolderName(uri: Uri): String {
+        return try {
+            val id = DocumentsContract.getTreeDocumentId(uri)
+            val value = id.substringAfter(":", id)
+            if (value.isBlank()) "المجلد المحدد" else value
+        } catch (_: Exception) {
+            uri.lastPathSegment ?: "المجلد المحدد"
+        }
+    }
+
     private fun createBackup(result: MethodChannel.Result) {
         val sp = getSharedPreferences(RecoveryAccessibilityService.PREFS, MODE_PRIVATE)
         val raw = sp.getString("projects_json", "[]") ?: "[]"
 
         val projects = try {
             JSONArray(raw)
-        } catch (e: Exception) {
-            result.error("INVALID_DISCOVERY", "تعذر قراءة نتائج الاكتشاف.", null)
+        } catch (_: Exception) {
+            result.error(
+                "INVALID_DISCOVERY",
+                "تعذر قراءة نتائج الاكتشاف.",
+                null
+            )
             return
         }
 
@@ -123,18 +191,35 @@ class MainActivity : FlutterActivity() {
             return
         }
 
-        if (
-            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 77)
-            result.error("STORAGE_PERMISSION", "اسمح للتطبيق بالوصول إلى التخزين ثم أعد المحاولة.", null)
+        val folderValue = sp.getString(KEY_BACKUP_TREE_URI, "") ?: ""
+        if (folderValue.isBlank()) {
+            result.error(
+                "FOLDER_REQUIRED",
+                "اختر مجلد حفظ النسخة الاحتياطية أولًا.",
+                null
+            )
+            return
+        }
+
+        val folderUri = try {
+            Uri.parse(folderValue)
+        } catch (_: Exception) {
+            result.error(
+                "INVALID_FOLDER",
+                "مجلد الحفظ المحدد غير صالح. اختر المجلد مرة أخرى.",
+                null
+            )
             return
         }
 
         io.execute {
             try {
-                val out = BackupWriter.createBackup(this, projects)
+                val out = BackupWriter.createBackup(
+                    this,
+                    projects,
+                    folderUri
+                )
+
                 runOnUiThread {
                     result.success(
                         mapOf(
@@ -146,7 +231,11 @@ class MainActivity : FlutterActivity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    result.error("BACKUP_FAILED", e.message ?: "فشل إنشاء ملف الاستعادة.", null)
+                    result.error(
+                        "BACKUP_FAILED",
+                        e.message ?: "فشل إنشاء ملف الاستعادة.",
+                        null
+                    )
                 }
             }
         }
@@ -158,8 +247,14 @@ class MainActivity : FlutterActivity() {
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
 
-        val expected = ComponentName(this, RecoveryAccessibilityService::class.java).flattenToString()
-        return enabled.split(":").any { it.equals(expected, ignoreCase = true) }
+        val expected = ComponentName(
+            this,
+            RecoveryAccessibilityService::class.java
+        ).flattenToString()
+
+        return enabled.split(":").any {
+            it.equals(expected, ignoreCase = true)
+        }
     }
 
     override fun onDestroy() {
